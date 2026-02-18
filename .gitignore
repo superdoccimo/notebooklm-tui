@@ -1,0 +1,7 @@
+downloads/
+.cookies.txt
+.nlm_cookies.txt
+__pycache__/
+*.egg-info/
+dist/
+build/

@@ -1,0 +1,33 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "nlm-backup"
+version = "1.0.0"
+description = "NotebookLM backup & restore tool - zero dependencies, pure Python"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.10"
+authors = [
+    { name = "minokamo" },
+]
+keywords = ["notebooklm", "backup", "restore", "upload", "google", "nlm"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Topic :: Utilities",
+]
+
+[project.scripts]
+nlm-backup = "nlm_backup:main"
+nlm-upload = "nlm_upload:main"
+nlm-login = "nlm_login:main"
+nlm-tui = "nlm_tui:main"
+nlm-tui-en = "nlm_tui_en:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["."]
+include = ["nlm_backup.py", "nlm_upload.py", "nlm_login.py", "nlm_tui.py", "nlm_tui_en.py", "notebooklm_client.py"]
