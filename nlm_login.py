@@ -1,18 +1,19 @@
 """
-nlm_login.py: NotebookLM 認証ツール
+nlm_login.py: NotebookLM authentication tool
 
-ブラウザを起動して Google ログイン → クッキーを自動取得。
-Chrome, Edge, Brave, Firefox に対応。
-外部パッケージ依存ゼロ。
+Launch a browser for Google login and automatically retrieve cookies.
+Supports Chrome, Edge, Brave, and Firefox. Zero external dependencies.
+
+Language: Set NLM_LANG=en or NLM_LANG=ja (auto-detected from OS locale).
 
 Usage:
-    python nlm_login.py                  # OSに応じて既定ブラウザ候補でログイン
-    python nlm_login.py --browser chrome # Chrome でログイン
-    python nlm_login.py --browser firefox # Firefox でログイン
+    python nlm_login.py                  # Login with default browser
+    python nlm_login.py --browser chrome # Login with Chrome
+    python nlm_login.py --browser firefox # Login with Firefox
     python nlm_login.py --browser firefox --firefox-profile ~/.mozilla/firefox/xxxx.default-release
-    python nlm_login.py --extract        # ブラウザ終了状態でDB直接読み取り
-    python nlm_login.py --check          # 認証状態を確認
-    python nlm_login.py --list-browsers  # 検出されたブラウザ一覧
+    python nlm_login.py --extract        # Direct DB read (browser must be closed)
+    python nlm_login.py --check          # Check authentication status
+    python nlm_login.py --list-browsers  # List detected browsers
 """
 
 import argparse
@@ -21,6 +22,7 @@ import configparser
 import ctypes
 import ctypes.wintypes
 import json
+import locale
 import os
 import shutil
 import socket
@@ -40,7 +42,241 @@ CDP_PORT = 9222
 
 
 # ---------------------------------------------------------------------------
-# ブラウザ検出
+# i18n
+# ---------------------------------------------------------------------------
+
+def _detect_lang() -> str:
+    env = os.environ.get("NLM_LANG", "").lower()
+    if env in ("ja", "en"):
+        return env
+    try:
+        loc = locale.getdefaultlocale()[0] or ""
+    except Exception:
+        loc = ""
+    return "ja" if loc.startswith("ja") else "en"
+
+
+LANG = _detect_lang()
+
+MESSAGES = {
+    # --- CLI help ---
+    "cli_description": {
+        "ja": "NotebookLM 認証ツール - ブラウザからクッキーを取得",
+        "en": "NotebookLM auth tool - retrieve cookies from browser",
+    },
+    "cli_epilog": {
+        "ja": (
+            "例:\n"
+            "  python nlm_login.py              # 既定ブラウザ候補でログイン\n"
+            "  python nlm_login.py -b chrome     # Chrome でログイン\n"
+            "  python nlm_login.py -b firefox    # Firefox でログイン\n"
+            "  python nlm_login.py -b firefox --firefox-profile ~/.mozilla/firefox/xxxx.default-release\n"
+            "  python nlm_login.py --extract     # DB直接読み取り(ブラウザ終了必要)\n"
+            "  python nlm_login.py --check       # 認証確認\n"
+        ),
+        "en": (
+            "Examples:\n"
+            "  python nlm_login.py              # Login with default browser\n"
+            "  python nlm_login.py -b chrome     # Login with Chrome\n"
+            "  python nlm_login.py -b firefox    # Login with Firefox\n"
+            "  python nlm_login.py -b firefox --firefox-profile ~/.mozilla/firefox/xxxx.default-release\n"
+            "  python nlm_login.py --extract     # Direct DB read (browser must be closed)\n"
+            "  python nlm_login.py --check       # Check auth status\n"
+        ),
+    },
+    "help_browser": {
+        "ja": "ブラウザを指定 (edge/chrome/brave/firefox)",
+        "en": "Specify browser (edge/chrome/brave/firefox)",
+    },
+    "help_extract": {
+        "ja": "DB直接読み取り (ブラウザ終了が必要)",
+        "en": "Direct DB read (browser must be closed)",
+    },
+    "help_check": {
+        "ja": "認証状態を確認",
+        "en": "Check authentication status",
+    },
+    "help_list_browsers": {
+        "ja": "検出ブラウザ一覧",
+        "en": "List detected browsers",
+    },
+    "help_firefox_profile": {
+        "ja": "Firefox プロファイルディレクトリ (cookies.sqlite があるパス)",
+        "en": "Firefox profile directory (path containing cookies.sqlite)",
+    },
+    "help_output": {
+        "ja": "クッキー出力先",
+        "en": "Cookie output path",
+    },
+    # --- Browser detection / selection ---
+    "err_browser_not_found": {
+        "ja": "[ERROR] {browser} が見つかりません。",
+        "en": "[ERROR] {browser} not found.",
+    },
+    "available_browsers": {
+        "ja": "  利用可能: {browsers}",
+        "en": "  Available: {browsers}",
+    },
+    "err_no_browser": {
+        "ja": "[ERROR] 対応ブラウザが見つかりません (Edge, Chrome, Brave, Firefox)",
+        "en": "[ERROR] No supported browser found (Edge, Chrome, Brave, Firefox)",
+    },
+    "detected_browsers": {
+        "ja": "\n検出されたブラウザ:",
+        "en": "\nDetected browsers:",
+    },
+    "profile_not_detected": {
+        "ja": "(未検出: 実行時に一時プロファイルでフォールバック)",
+        "en": "(not detected: will fall back to temporary profile)",
+    },
+    # --- CDP login ---
+    "launching_browser": {
+        "ja": "\n{name} を起動します...",
+        "en": "\nLaunching {name}...",
+    },
+    "login_instruction": {
+        "ja": "\n  ブラウザで Google アカウントにログインしてください。\n  NotebookLM のホーム画面が表示されたら、",
+        "en": "\n  Please log in to your Google account in the browser.\n  Once the NotebookLM home screen appears,",
+    },
+    "press_enter": {
+        "ja": "  ここに戻って Enter を押してください > ",
+        "en": "  come back here and press Enter > ",
+    },
+    "cancelled": {
+        "ja": "\nキャンセルしました。",
+        "en": "\nCancelled.",
+    },
+    "fetching_cookies": {
+        "ja": "\n  クッキーを取得中...",
+        "en": "\n  Fetching cookies...",
+    },
+    "err_cdp_failed": {
+        "ja": "  [ERROR] CDP 通信に失敗: {error}",
+        "en": "  [ERROR] CDP communication failed: {error}",
+    },
+    "err_cdp_timeout": {
+        "ja": "CDP レスポンスがタイムアウト: {method}",
+        "en": "CDP response timed out: {method}",
+    },
+    "err_no_page_tab": {
+        "ja": "ページタブが見つかりません",
+        "en": "No page tab found",
+    },
+    # --- Firefox login ---
+    "firefox_temp_profile": {
+        "ja": "  既存 Firefox プロファイルが未検出のため、一時プロファイルで起動します。",
+        "en": "  No existing Firefox profile detected; launching with temporary profile.",
+    },
+    "warn_browser_launch_failed": {
+        "ja": "\n  [WARN] ブラウザ起動に失敗: {error}",
+        "en": "\n  [WARN] Failed to launch browser: {error}",
+    },
+    "firefox_manual_open": {
+        "ja": "  手動で Firefox を開いて NotebookLM にログインしてください。",
+        "en": "  Please open Firefox manually and log in to NotebookLM.",
+    },
+    "firefox_login_instruction": {
+        "ja": "\n  Firefox で NotebookLM にログインしてください。",
+        "en": "\n  Please log in to NotebookLM in Firefox.",
+    },
+    "firefox_close_then_enter": {
+        "ja": "  ログイン後、この Firefox ウィンドウを閉じてから Enter を押してください。",
+        "en": "  After login, close this Firefox window and then press Enter.",
+    },
+    "firefox_press_enter": {
+        "ja": "  ログイン後、ここに戻って Enter を押してください > ",
+        "en": "  After login, come back here and press Enter > ",
+    },
+    "err_firefox_cookies_not_found": {
+        "ja": "Firefox の cookies.sqlite が見つかりません: {path}",
+        "en": "Firefox cookies.sqlite not found: {path}",
+    },
+    "err_firefox_copy_failed": {
+        "ja": "Firefox クッキーDBのコピーに失敗: {error}",
+        "en": "Failed to copy Firefox cookie DB: {error}",
+    },
+    "err_firefox_read_failed": {
+        "ja": "Firefox クッキーDBの読み取りに失敗: {error}",
+        "en": "Failed to read Firefox cookie DB: {error}",
+    },
+    # --- DB extract ---
+    "err_browser_key_not_found": {
+        "ja": "{browser} が見つかりません",
+        "en": "{browser} not found",
+    },
+    "err_cookies_db_not_found": {
+        "ja": "クッキーDBが見つかりません: {path}",
+        "en": "Cookie DB not found: {path}",
+    },
+    "err_cookies_db_locked": {
+        "ja": (
+            "クッキーDBがロックされています。\n"
+            "  {name} を終了してから再実行してください。\n"
+            "  または python nlm_login.py (CDP方式) を使ってください。\n"
+            "  元のエラー: {error}"
+        ),
+        "en": (
+            "Cookie DB is locked.\n"
+            "  Please close {name} and try again.\n"
+            "  Or use python nlm_login.py (CDP mode) instead.\n"
+            "  Original error: {error}"
+        ),
+    },
+    "extract_reading": {
+        "ja": "\n{name} のクッキーDB から直接読み取ります...",
+        "en": "\nReading cookies directly from {name} DB...",
+    },
+    "err_extract_windows_only": {
+        "ja": "[ERROR] --extract は現在 Windows でのみサポートしています。\n  Linux/macOS では通常モード（CDP方式）を使用してください。",
+        "en": "[ERROR] --extract is currently supported on Windows only.\n  On Linux/macOS, use the default mode (CDP) instead.",
+    },
+    # --- Common / results ---
+    "err_no_cookies": {
+        "ja": "\n[ERROR] Google クッキーが取得できませんでした。\n  NotebookLM にログインしてから再実行してください。",
+        "en": "\n[ERROR] Failed to retrieve Google cookies.\n  Please log in to NotebookLM and try again.",
+    },
+    "err_missing_cookies": {
+        "ja": "\n[ERROR] 必要なクッキーが不足: {missing}\n  NotebookLM にログインしてから再実行してください。",
+        "en": "\n[ERROR] Required cookies missing: {missing}\n  Please log in to NotebookLM and try again.",
+    },
+    "cookies_saved": {
+        "ja": "\n  クッキー保存完了 → {path}\n  ({count} 件の Google クッキー)",
+        "en": "\n  Cookies saved -> {path}\n  ({count} Google cookies)",
+    },
+    "verifying_auth": {
+        "ja": "\n認証を確認中...",
+        "en": "\nVerifying authentication...",
+    },
+    "setup_complete": {
+        "ja": "\nセットアップ完了! nlm-backup / nlm-upload が使えます。",
+        "en": "\nSetup complete! You can now use nlm-backup / nlm-upload.",
+    },
+    "warn_auth_failed": {
+        "ja": "\n[WARN] 認証に失敗しました。再度ログインしてください。",
+        "en": "\n[WARN] Authentication failed. Please log in again.",
+    },
+    "cookies_file_not_found": {
+        "ja": "クッキーファイルが見つかりません: {path}",
+        "en": "Cookie file not found: {path}",
+    },
+    "auth_ok": {
+        "ja": "認証OK - {count} 件のノートブックにアクセスできます。",
+        "en": "Auth OK - {count} notebook(s) accessible.",
+    },
+    "auth_error": {
+        "ja": "認証エラー ({error_type}): {error}",
+        "en": "Auth error ({error_type}): {error}",
+    },
+}
+
+
+def msg(key: str, **kwargs) -> str:
+    entry = MESSAGES[key]
+    return entry.get(LANG, entry["en"]).format(**kwargs)
+
+
+# ---------------------------------------------------------------------------
+# Browser detection
 # ---------------------------------------------------------------------------
 
 BROWSER_REGISTRY = {
@@ -95,18 +331,18 @@ BROWSER_REGISTRY = {
 
 
 def find_browser_exe(browser_key: str) -> str | None:
-    """ブラウザ実行ファイルを探す"""
+    """Find browser executable."""
     info = BROWSER_REGISTRY.get(browser_key)
     if not info:
         return None
 
-    # PATH から探す
+    # Search PATH
     for name in info["exe_names"]:
         found = shutil.which(name)
         if found:
             return found
 
-    # Windows レジストリから探す
+    # Search Windows registry
     try:
         import winreg
         key = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, info["registry_key"])
@@ -117,7 +353,7 @@ def find_browser_exe(browser_key: str) -> str | None:
     except (OSError, ImportError):
         pass
 
-    # 既知のパスから探す（環境によっては無効なパス文字列で OSError になるため保護）
+    # Search known paths (protect against invalid path strings)
     for path in info["known_paths"]:
         try:
             if Path(path).exists():
@@ -129,7 +365,7 @@ def find_browser_exe(browser_key: str) -> str | None:
 
 
 def detect_browsers() -> dict[str, dict]:
-    """利用可能なブラウザを検出"""
+    """Detect available browsers."""
     browsers = {}
     for key, info in BROWSER_REGISTRY.items():
         exe = find_browser_exe(key)
@@ -212,7 +448,7 @@ def find_firefox_profile_dir() -> Path | None:
         if selected:
             return selected
 
-        # profiles.ini が無い場合のフォールバック（snap/portable 等）
+        # Fallback when profiles.ini is missing (snap/portable etc.)
         if not root.exists():
             continue
         candidates: list[tuple[int, Path]] = []
@@ -234,11 +470,11 @@ def find_firefox_profile_dir() -> Path | None:
 
 
 # ---------------------------------------------------------------------------
-# 簡易 WebSocket クライアント（CDP 用、stdlib のみ）
+# Minimal WebSocket client for CDP (stdlib only)
 # ---------------------------------------------------------------------------
 
 class SimpleWebSocket:
-    """CDP 通信用の最小 WebSocket クライアント"""
+    """Minimal WebSocket client for CDP communication."""
 
     def __init__(self, url: str):
         parsed = urllib.parse.urlparse(url)
@@ -314,7 +550,7 @@ class SimpleWebSocket:
 
         if opcode == 8:  # close
             raise RuntimeError("WebSocket closed by server")
-        if opcode == 9:  # ping → pong
+        if opcode == 9:  # ping -> pong
             self.sock.sendall(b"\x8a\x80" + os.urandom(4))
             return self.recv()
 
@@ -337,23 +573,23 @@ class SimpleWebSocket:
 
 
 # ---------------------------------------------------------------------------
-# CDP ログイン（メイン方式）
+# CDP login (primary method)
 # ---------------------------------------------------------------------------
 
 def cdp_login(browser_key: str, browsers: dict, output_path: Path) -> list[dict]:
-    """ブラウザを起動してCDP経由でクッキーを取得"""
+    """Launch browser and retrieve cookies via CDP."""
     if browser_key not in browsers:
-        print(f"[ERROR] {browser_key} が見つかりません。")
-        print(f"  利用可能: {', '.join(browsers.keys())}")
+        print(msg("err_browser_not_found", browser=browser_key))
+        print(msg("available_browsers", browsers=", ".join(browsers.keys())))
         sys.exit(1)
 
     info = browsers[browser_key]
     exe = info["exe"]
     tmpdir = tempfile.mkdtemp(prefix="nlm_login_")
 
-    print(f"\n{info['name']} を起動します...")
+    print(msg("launching_browser", name=info["name"]))
 
-    # ブラウザ起動（一時プロファイル + デバッグポート）
+    # Launch browser with temporary profile + debug port
     proc = subprocess.Popen(
         [
             exe,
@@ -367,23 +603,22 @@ def cdp_login(browser_key: str, browsers: dict, output_path: Path) -> list[dict]
         stderr=subprocess.DEVNULL,
     )
 
-    print(f"\n  ブラウザで Google アカウントにログインしてください。")
-    print(f"  NotebookLM のホーム画面が表示されたら、")
+    print(msg("login_instruction"))
 
     try:
-        input("  ここに戻って Enter を押してください > ")
+        input(msg("press_enter"))
     except (EOFError, KeyboardInterrupt):
         proc.terminate()
         shutil.rmtree(tmpdir, ignore_errors=True)
-        print("\nキャンセルしました。")
+        print(msg("cancelled"))
         sys.exit(0)
 
-    # CDP でクッキー取得
-    print("\n  クッキーを取得中...")
+    # Retrieve cookies via CDP
+    print(msg("fetching_cookies"))
     try:
         cookies = get_cookies_via_cdp()
     except Exception as e:
-        print(f"  [ERROR] CDP 通信に失敗: {e}")
+        print(msg("err_cdp_failed", error=e))
         cookies = []
     finally:
         proc.terminate()
@@ -391,7 +626,6 @@ def cdp_login(browser_key: str, browsers: dict, output_path: Path) -> list[dict]
             proc.wait(timeout=5)
         except subprocess.TimeoutExpired:
             proc.kill()
-        # 少し待ってから一時フォルダ削除
         time.sleep(1)
         shutil.rmtree(tmpdir, ignore_errors=True)
 
@@ -399,10 +633,10 @@ def cdp_login(browser_key: str, browsers: dict, output_path: Path) -> list[dict]
 
 
 def extract_firefox_cookies(profile_dir: Path) -> list[dict]:
-    """Firefox プロファイルの cookies.sqlite から Google クッキーを取得"""
+    """Extract Google cookies from Firefox profile's cookies.sqlite."""
     cookies_db = profile_dir / "cookies.sqlite"
     if not cookies_db.exists():
-        raise RuntimeError(f"Firefox の cookies.sqlite が見つかりません: {cookies_db}")
+        raise RuntimeError(msg("err_firefox_cookies_not_found", path=cookies_db))
 
     query = (
         "SELECT host, name, value, path, expiry, isSecure "
@@ -415,21 +649,21 @@ def extract_firefox_cookies(profile_dir: Path) -> list[dict]:
 
     try:
         shutil.copy2(cookies_db, tmp_db)
-        # WAL モードで稼働中の場合に備えて付随ファイルもコピー
+        # Copy WAL-mode companion files if present
         for suffix in ("-wal", "-shm"):
             src = profile_dir / f"cookies.sqlite{suffix}"
             if src.exists():
                 shutil.copy2(src, tmp_dir / src.name)
     except OSError as e:
         shutil.rmtree(tmp_dir, ignore_errors=True)
-        raise RuntimeError(f"Firefox クッキーDBのコピーに失敗: {e}")
+        raise RuntimeError(msg("err_firefox_copy_failed", error=e))
 
     conn = None
     try:
         conn = sqlite3.connect(str(tmp_db))
         rows = conn.execute(query).fetchall()
     except sqlite3.Error as e:
-        raise RuntimeError(f"Firefox クッキーDBの読み取りに失敗: {e}")
+        raise RuntimeError(msg("err_firefox_read_failed", error=e))
     finally:
         try:
             if conn is not None:
@@ -456,22 +690,20 @@ def extract_firefox_cookies(profile_dir: Path) -> list[dict]:
 
 
 def firefox_login(info: dict) -> list[dict]:
-    """Firefox を開いてログインさせた後に、プロファイルDBからクッキーを取得"""
+    """Open Firefox for login, then extract cookies from profile DB."""
     profile_dir = info.get("profile_dir")
     temp_profile_dir: Path | None = None
     firefox_proc: subprocess.Popen | None = None
     use_temp_profile = profile_dir is None
 
     if use_temp_profile:
-        # 初回起動前などで既存プロファイルが見つからない場合に備えて、
-        # 一時プロファイルを作ってログインさせ、そこからクッキーを読む。
         temp_profile_dir = Path(tempfile.mkdtemp(prefix="nlm_firefox_profile_"))
         profile_dir = temp_profile_dir
 
-    print(f"\n{info['name']} を起動します...")
+    print(msg("launching_browser", name=info["name"]))
     try:
         if use_temp_profile:
-            print("  既存 Firefox プロファイルが未検出のため、一時プロファイルで起動します。")
+            print(msg("firefox_temp_profile"))
             firefox_proc = subprocess.Popen(
                 [
                     info["exe"],
@@ -490,14 +722,14 @@ def firefox_login(info: dict) -> list[dict]:
                 stderr=subprocess.DEVNULL,
             )
     except OSError as e:
-        print(f"\n  [WARN] ブラウザ起動に失敗: {e}")
-        print("  手動で Firefox を開いて NotebookLM にログインしてください。")
+        print(msg("warn_browser_launch_failed", error=e))
+        print(msg("firefox_manual_open"))
 
-    print("\n  Firefox で NotebookLM にログインしてください。")
+    print(msg("firefox_login_instruction"))
     if use_temp_profile:
-        print("  ログイン後、この Firefox ウィンドウを閉じてから Enter を押してください。")
+        print(msg("firefox_close_then_enter"))
     try:
-        input("  ログイン後、ここに戻って Enter を押してください > ")
+        input(msg("firefox_press_enter"))
     except (EOFError, KeyboardInterrupt):
         if firefox_proc and firefox_proc.poll() is None:
             firefox_proc.terminate()
@@ -507,7 +739,7 @@ def firefox_login(info: dict) -> list[dict]:
                 firefox_proc.kill()
         if temp_profile_dir:
             shutil.rmtree(temp_profile_dir, ignore_errors=True)
-        print("\nキャンセルしました。")
+        print(msg("cancelled"))
         sys.exit(0)
 
     try:
@@ -526,7 +758,7 @@ def firefox_login(info: dict) -> list[dict]:
 
 
 def _cdp_send_recv(ws: SimpleWebSocket, msg_id: int, method: str, params: dict | None = None) -> dict:
-    """CDP コマンドを送信してレスポンスを待つ"""
+    """Send a CDP command and wait for a response."""
     cmd = {"id": msg_id, "method": method}
     if params:
         cmd["params"] = params
@@ -537,16 +769,15 @@ def _cdp_send_recv(ws: SimpleWebSocket, msg_id: int, method: str, params: dict |
         result = json.loads(raw)
         if result.get("id") == msg_id:
             return result
-    raise RuntimeError(f"CDP レスポンスがタイムアウト: {method}")
+    raise RuntimeError(msg("err_cdp_timeout", method=method))
 
 
 def get_cookies_via_cdp() -> list[dict]:
-    """CDP WebSocket で全クッキーを取得"""
-    # ページタブの WebSocket を取得
+    """Retrieve all cookies via CDP WebSocket."""
     resp = urllib.request.urlopen(f"http://localhost:{CDP_PORT}/json", timeout=5)
     tabs = json.loads(resp.read())
 
-    # NotebookLM または Google のページタブを探す
+    # Find a NotebookLM or Google page tab
     ws_url = None
     for tab in tabs:
         if tab.get("type") != "page":
@@ -556,23 +787,22 @@ def get_cookies_via_cdp() -> list[dict]:
             ws_url = tab.get("webSocketDebuggerUrl")
             break
     if not ws_url:
-        # 最初のページタブを使う
+        # Fall back to the first page tab
         for tab in tabs:
             if tab.get("type") == "page" and tab.get("webSocketDebuggerUrl"):
                 ws_url = tab["webSocketDebuggerUrl"]
                 break
     if not ws_url:
-        raise RuntimeError("ページタブが見つかりません")
+        raise RuntimeError(msg("err_no_page_tab"))
 
     ws = SimpleWebSocket(ws_url)
     try:
-        # Network ドメインを有効化してからクッキー取得
         _cdp_send_recv(ws, 1, "Network.enable")
         result = _cdp_send_recv(ws, 2, "Network.getAllCookies")
     finally:
         ws.close()
 
-    # Google クッキーをフィルタリング
+    # Filter Google cookies
     raw_cookies = result.get("result", {}).get("cookies", [])
     cookies = []
     for c in raw_cookies:
@@ -590,7 +820,7 @@ def get_cookies_via_cdp() -> list[dict]:
 
 
 # ---------------------------------------------------------------------------
-# DB 直接読み取り（ブラウザ終了時のみ有効）
+# Direct DB read (only works when browser is closed)
 # ---------------------------------------------------------------------------
 
 class DATA_BLOB(ctypes.Structure):
@@ -601,7 +831,7 @@ class DATA_BLOB(ctypes.Structure):
 
 
 def dpapi_decrypt(encrypted: bytes) -> bytes:
-    """Windows DPAPI で復号"""
+    """Decrypt using Windows DPAPI."""
     crypt32 = ctypes.windll.crypt32
     kernel32 = ctypes.windll.kernel32
 
@@ -636,7 +866,7 @@ class BCRYPT_AUTH_MODE_INFO(ctypes.Structure):
 
 
 def aes_gcm_decrypt(key: bytes, nonce: bytes, ciphertext: bytes, tag: bytes) -> bytes:
-    """AES-256-GCM 復号 (Windows CNG bcrypt.dll)"""
+    """AES-256-GCM decryption via Windows CNG bcrypt.dll."""
     bcrypt = ctypes.windll.bcrypt
 
     alg_handle = ctypes.c_void_p()
@@ -685,7 +915,7 @@ def aes_gcm_decrypt(key: bytes, nonce: bytes, ciphertext: bytes, tag: bytes) -> 
 
 
 def get_chromium_key(user_data: Path) -> bytes:
-    """Local State から暗号化キーを取得"""
+    """Retrieve encryption key from Local State."""
     with open(user_data / "Local State", encoding="utf-8") as f:
         state = json.load(f)
     enc_key = base64.b64decode(state["os_crypt"]["encrypted_key"])
@@ -713,14 +943,14 @@ def decrypt_cookie_value(encrypted: bytes, key: bytes) -> str:
 
 
 def extract_from_db(browser_key: str, browsers: dict) -> list[dict]:
-    """ブラウザのクッキーDBから直接読み取り（ブラウザ終了が必要）"""
+    """Read cookies directly from browser's cookie DB (browser must be closed)."""
     if browser_key not in browsers:
-        raise RuntimeError(f"{browser_key} が見つかりません")
+        raise RuntimeError(msg("err_browser_key_not_found", browser=browser_key))
 
     info = browsers[browser_key]
     user_data = info["user_data"]
 
-    # クッキーDBを探す
+    # Find cookie DB
     cookies_db = None
     for profile in ["Default", "Profile 1", "Profile 2", "Profile 3"]:
         for subpath in ["Network/Cookies", "Cookies"]:
@@ -732,22 +962,17 @@ def extract_from_db(browser_key: str, browsers: dict) -> list[dict]:
             break
 
     if not cookies_db:
-        raise RuntimeError(f"クッキーDBが見つかりません: {user_data}")
+        raise RuntimeError(msg("err_cookies_db_not_found", path=user_data))
 
-    # 暗号化キー取得
+    # Get encryption key
     key = get_chromium_key(user_data)
 
-    # DBをコピーして読む
+    # Copy DB and read
     tmp = Path(tempfile.gettempdir()) / "nlm_cookies_extract.db"
     try:
         shutil.copy2(cookies_db, tmp)
     except OSError as e:
-        raise RuntimeError(
-            f"クッキーDBがロックされています。\n"
-            f"  {info['name']} を終了してから再実行してください。\n"
-            f"  または python nlm_login.py (CDP方式) を使ってください。\n"
-            f"  元のエラー: {e}"
-        )
+        raise RuntimeError(msg("err_cookies_db_locked", name=info["name"], error=e))
 
     conn = sqlite3.connect(str(tmp))
     try:
@@ -775,7 +1000,7 @@ def extract_from_db(browser_key: str, browsers: dict) -> list[dict]:
 
 
 # ---------------------------------------------------------------------------
-# 共通処理
+# Common
 # ---------------------------------------------------------------------------
 
 def validate_cookies(cookies: list[dict]) -> bool:
@@ -788,7 +1013,6 @@ def save_cookies(cookies: list[dict], output_path: Path):
     with open(tmp_path, "w", encoding="utf-8") as f:
         json.dump(cookies, f, ensure_ascii=False, indent=2)
 
-    # 可能な環境では最小権限に寄せる（Windows では ACL までは制御しない）
     try:
         os.chmod(tmp_path, 0o600)
     except OSError:
@@ -803,16 +1027,16 @@ def save_cookies(cookies: list[dict], output_path: Path):
 
 def check_auth(cookies_path: Path) -> bool:
     if not cookies_path.exists():
-        print(f"クッキーファイルが見つかりません: {cookies_path}")
+        print(msg("cookies_file_not_found", path=cookies_path))
         return False
     try:
         from notebooklm_client import NotebookLMClient
         client = NotebookLMClient(cookies_path=cookies_path)
         notebooks = client.list_notebooks()
-        print(f"認証OK - {len(notebooks)} 件のノートブックにアクセスできます。")
+        print(msg("auth_ok", count=len(notebooks)))
         return True
     except Exception as e:
-        print(f"認証エラー ({type(e).__name__}): {e}")
+        print(msg("auth_error", error_type=type(e).__name__, error=e))
         return False
 
 
@@ -820,8 +1044,8 @@ def select_browser(browsers: dict, preferred: str | None = None) -> str:
     if preferred:
         if preferred in browsers:
             return preferred
-        print(f"[ERROR] '{preferred}' が見つかりません。")
-        print(f"  利用可能: {', '.join(browsers.keys())}")
+        print(msg("err_browser_not_found", browser=preferred))
+        print(msg("available_browsers", browsers=", ".join(browsers.keys())))
         sys.exit(1)
 
     priority = ["edge", "chrome", "brave", "firefox"]
@@ -841,28 +1065,22 @@ def select_browser(browsers: dict, preferred: str | None = None) -> str:
 def main():
     parser = argparse.ArgumentParser(
         prog="nlm-login",
-        description="NotebookLM 認証ツール - ブラウザからクッキーを取得",
-        epilog="例:\n"
-               "  python nlm_login.py              # 既定ブラウザ候補でログイン\n"
-               "  python nlm_login.py -b chrome     # Chrome でログイン\n"
-               "  python nlm_login.py -b firefox    # Firefox でログイン\n"
-               "  python nlm_login.py -b firefox --firefox-profile ~/.mozilla/firefox/xxxx.default-release\n"
-               "  python nlm_login.py --extract     # DB直接読み取り(ブラウザ終了必要)\n"
-               "  python nlm_login.py --check       # 認証確認\n",
+        description=msg("cli_description"),
+        epilog=msg("cli_epilog"),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    parser.add_argument("--browser", "-b", help="ブラウザを指定 (edge/chrome/brave/firefox)")
+    parser.add_argument("--browser", "-b", help=msg("help_browser"))
     parser.add_argument("--extract", action="store_true",
-                        help="DB直接読み取り (ブラウザ終了が必要)")
-    parser.add_argument("--check", action="store_true", help="認証状態を確認")
-    parser.add_argument("--list-browsers", action="store_true", help="検出ブラウザ一覧")
+                        help=msg("help_extract"))
+    parser.add_argument("--check", action="store_true", help=msg("help_check"))
+    parser.add_argument("--list-browsers", action="store_true", help=msg("help_list_browsers"))
     parser.add_argument(
         "--firefox-profile",
         type=str,
         default=None,
-        help="Firefox プロファイルディレクトリ (cookies.sqlite があるパス)",
+        help=msg("help_firefox_profile"),
     )
-    parser.add_argument("--output", "-o", type=str, default=None, help="クッキー出力先")
+    parser.add_argument("--output", "-o", type=str, default=None, help=msg("help_output"))
     args = parser.parse_args()
 
     output_path = Path(args.output) if args.output else DEFAULT_COOKIES_PATH
@@ -872,17 +1090,16 @@ def main():
         sys.exit(0 if ok else 1)
 
     if args.extract and sys.platform != "win32":
-        print("[ERROR] --extract は現在 Windows でのみサポートしています。")
-        print("  Linux/macOS では通常モード（CDP方式）を使用してください。")
+        print(msg("err_extract_windows_only"))
         sys.exit(1)
 
     browsers = detect_browsers()
     if not browsers:
-        print("[ERROR] 対応ブラウザが見つかりません (Edge, Chrome, Brave, Firefox)")
+        print(msg("err_no_browser"))
         sys.exit(1)
 
     if args.list_browsers:
-        print("\n検出されたブラウザ:")
+        print(msg("detected_browsers"))
         for key, info in browsers.items():
             print(f"  {key:>10}  {info['name']}")
             print(f"             {info['exe']}")
@@ -891,13 +1108,13 @@ def main():
                 if profile_dir:
                     print(f"             profile: {profile_dir}")
                 else:
-                    print("             profile: (未検出: 実行時に一時プロファイルでフォールバック)")
+                    print(f"             profile: {msg('profile_not_detected')}")
         return
 
     browser_key = select_browser(browsers, args.browser)
     info = browsers[browser_key]
 
-    # クッキー取得
+    # Retrieve cookies
     if browser_key == "firefox":
         if args.firefox_profile:
             info = dict(info)
@@ -908,7 +1125,7 @@ def main():
             print(f"\n[ERROR] {e}")
             sys.exit(1)
     elif args.extract:
-        print(f"\n{info['name']} のクッキーDB から直接読み取ります...")
+        print(msg("extract_reading", name=info["name"]))
         try:
             cookies = extract_from_db(browser_key, browsers)
         except RuntimeError as e:
@@ -918,25 +1135,22 @@ def main():
         cookies = cdp_login(browser_key, browsers, output_path)
 
     if not cookies:
-        print("\n[ERROR] Google クッキーが取得できませんでした。")
-        print("  NotebookLM にログインしてから再実行してください。")
+        print(msg("err_no_cookies"))
         sys.exit(1)
 
     if not validate_cookies(cookies):
         missing = REQUIRED_COOKIES - {c["name"] for c in cookies}
-        print(f"\n[ERROR] 必要なクッキーが不足: {', '.join(missing)}")
-        print("  NotebookLM にログインしてから再実行してください。")
+        print(msg("err_missing_cookies", missing=", ".join(missing)))
         sys.exit(1)
 
     save_cookies(cookies, output_path)
-    print(f"\n  クッキー保存完了 → {output_path}")
-    print(f"  ({len(cookies)} 件の Google クッキー)")
+    print(msg("cookies_saved", path=output_path, count=len(cookies)))
 
-    print("\n認証を確認中...")
+    print(msg("verifying_auth"))
     if check_auth(output_path):
-        print("\nセットアップ完了! nlm-backup / nlm-upload が使えます。")
+        print(msg("setup_complete"))
     else:
-        print("\n[WARN] 認証に失敗しました。再度ログインしてください。")
+        print(msg("warn_auth_failed"))
         sys.exit(1)
 
 
