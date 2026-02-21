@@ -7,8 +7,10 @@ NotebookLM のバックアップ＆リストア CLI/TUI ツール。
 - **nlm-upload** — ファイルやURLを一括アップロード、バックアップからの復元
 - **nlm-tui** — 日本語UIのTUIで選択・閲覧・一括バックアップ
 - **nlm-tui-en** — 英語UIのTUIで選択・閲覧・一括バックアップ
+- **nlm-tui-curses**（スクリプト: `nlm_tui_curses.py`）— curses ベースのちらつき抑制TUI（実験的）
 
-**外部パッケージ依存ゼロ** — Python 標準ライブラリのみで動作します。
+**コア機能は外部パッケージ依存ゼロ** — Python 標準ライブラリのみで動作します。  
+`nlm_tui_curses.py` は Windows 環境によって追加セットアップが必要です（後述）。
 
 ## Quick Start
 
@@ -45,6 +47,9 @@ python nlm_tui.py
 
 # 英語UI
 python nlm_tui_en.py
+
+# curses UI（ちらつき抑制）
+python nlm_tui_curses.py
 ```
 
 ## Prerequisites
@@ -55,7 +60,7 @@ python nlm_tui_en.py
 | Edge / Chrome / Brave / Firefox | - | いずれか1つ |
 | Google アカウント | - | NotebookLM を使用中のアカウント |
 
-これだけです。追加のパッケージインストールは不要です。
+コアCLI/TUI（`nlm-login`, `nlm-backup`, `nlm-upload`, `nlm-tui`, `nlm-tui-en`）は追加のパッケージインストール不要です。
 
 > Linux では `firefox` / `google-chrome` / `chromium` / `brave-browser` を自動検出します。
 
@@ -182,6 +187,38 @@ nlm-tui --log ./nlm_tui.log
 > `nlm-tui` は Windows / Linux の対話式ターミナルで動作します（標準ライブラリのみ）。
 > `u` キーのアップロードメニューでは、フォルダパスを指定して空ノートブックへ一括投入できます（複数は `;` 区切り）。
 
+## Usage: nlm_tui_curses.py（ちらつき抑制TUI・実験的）
+
+`curses` 描画で画面更新を行い、`clear/redraw` 方式よりちらつきを抑えるためのバリアントです。
+
+```bash
+# curses UIを起動
+python nlm_tui_curses.py
+
+# 出力先を指定
+python nlm_tui_curses.py -o ~/notebooklm-backup
+
+# クッキーファイルを指定
+python nlm_tui_curses.py --cookies /path/to/cookies.json
+
+# ログファイルを指定
+python nlm_tui_curses.py --log ./nlm_tui_curses.log
+```
+
+`nlm_tui_curses.py` は現状スクリプト実行専用で、`pip install .` しても `nlm-tui-curses` コマンドは追加されません。
+
+Windows での注意点:
+
+- Python ビルドによっては `_curses` が含まれず、`ModuleNotFoundError: No module named '_curses'` が発生します。
+- パッケージ導入が可能なら `windows-curses` を導入してください。
+- パッケージ導入が難しい場合は、curses が使える Python ビルド/バージョンで実行してください（この環境で確認できた例）:
+
+```bash
+~/.pyenv/pyenv-win/versions/3.12.0/python.exe nlm_tui_curses.py
+```
+
+実行できない場合は、`python nlm_tui.py` / `python nlm_tui_en.py` を利用してください。
+
 ### キー操作
 
 | キー | 動作 |
@@ -266,10 +303,11 @@ notebooklm_client.py    ← API クライアント（batchexecute RPC）
 ├── nlm_backup.py       ← バックアップツール
 ├── nlm_upload.py       ← アップロード/リストアツール
 ├── nlm_tui.py          ← 日本語UIのTUIブラウズ/選択バックアップツール
-└── nlm_tui_en.py       ← 英語UIのTUIブラウズ/選択バックアップツール
+├── nlm_tui_en.py       ← 英語UIのTUIブラウズ/選択バックアップツール
+└── nlm_tui_curses.py   ← curses ベースのTUIブラウズ/選択バックアップツール（実験的）
 ```
 
-- **外部パッケージ依存ゼロ**: `requests`, `httpx` 等は不要。`urllib` と `http.cookiejar` のみ使用
+- **コア機能は外部パッケージ依存ゼロ**: `requests`, `httpx` 等は不要。`urllib` と `http.cookiejar` のみ使用
 - **認証**: Chromium系は CDP、Firefox はプロファイルDBからクッキーを取得
 - **ブラウザ対応**: Edge, Chrome, Brave, Firefox（Windowsは Edge 優先、Linux は Firefox 優先）
 - **プロトコル**: batchexecute RPC over HTTPS
@@ -287,6 +325,24 @@ python nlm_login.py
 ### PDF が画像としてダウンロードされる
 
 これは仕様です。NotebookLM はアップロードされた PDF をページごとにレンダリングして画像として保管しています。そのため、元の PDF ファイルではなく、各ページの PNG 画像として取得されます。
+
+### Windows で `ModuleNotFoundError: No module named '_curses'` が出る
+
+現在の Python ビルドに curses バインディングが含まれていません。
+
+次のいずれかを試してください:
+
+```bash
+pip install windows-curses
+```
+
+または、curses が動作する Python ビルド/バージョンで実行:
+
+```bash
+~/.pyenv/pyenv-win/versions/3.12.0/python.exe nlm_tui_curses.py
+```
+
+上記が難しい場合は `nlm_tui.py` / `nlm_tui_en.py` を使用してください。
 
 ## License
 

@@ -9,8 +9,10 @@ A zero-dependency NotebookLM backup and restore toolkit for CLI and terminal UI 
 - `nlm-upload`: Upload files/URLs and restore from backup folders
 - `nlm-tui`: Japanese UI terminal TUI
 - `nlm-tui-en`: English UI terminal TUI
+- `nlm-tui-curses` (script: `nlm_tui_curses.py`): Curses-based flicker-reduced TUI (experimental)
 
-All tools run on Python standard library only (no third-party packages required).
+Core tools run on Python standard library only (no third-party packages required).
+`nlm_tui_curses.py` may require extra setup on Windows (see below).
 
 ## Quick Start
 
@@ -47,6 +49,9 @@ python nlm_tui.py
 
 # Interactive notebook browser + backup (English UI)
 python nlm_tui_en.py
+
+# Interactive notebook browser + backup (curses / reduced flicker)
+python nlm_tui_curses.py
 ```
 
 ## Prerequisites
@@ -57,7 +62,7 @@ python nlm_tui_en.py
 | One browser | - | Edge / Chrome / Brave / Firefox |
 | Google account | - | Must have access to NotebookLM |
 
-No extra package installation is required.
+No extra package installation is required for the core CLI/TUI tools (`nlm-login`, `nlm-backup`, `nlm-upload`, `nlm-tui`, `nlm-tui-en`).
 
 > On Linux, browser auto-detection checks `firefox`, `google-chrome`, `chromium`, and `brave-browser`.
 
@@ -178,6 +183,38 @@ nlm-tui --log ./nlm_tui.log
 > `nlm-tui` works on interactive terminals in Windows and Linux.
 > In upload menu (`u`), you can pass folder paths and upload multiple entries separated by `;`.
 
+## Usage: `nlm_tui_curses.py` (Flicker-Reduced TUI, Experimental)
+
+This variant uses `curses` screen rendering to reduce terminal flicker compared to clear/redraw loops.
+
+```bash
+# Start curses UI
+python nlm_tui_curses.py
+
+# Set output directory
+python nlm_tui_curses.py -o ~/notebooklm-backup
+
+# Specify cookie file
+python nlm_tui_curses.py --cookies /path/to/cookies.json
+
+# Write logs to file
+python nlm_tui_curses.py --log ./nlm_tui_curses.log
+```
+
+`nlm_tui_curses.py` is currently script-only and is not installed as a `nlm-tui-curses` command via `pip install .`.
+
+Windows notes:
+
+- Some Python builds do not include `_curses` (for example, `python 3.14` in this environment raised `ModuleNotFoundError: No module named '_curses'`).
+- If your environment allows package installation, install `windows-curses`.
+- If package installation is restricted, run with a Python version/build that already supports curses. Example that worked here:
+
+```bash
+~/.pyenv/pyenv-win/versions/3.12.0/python.exe nlm_tui_curses.py
+```
+
+If `nlm_tui_curses.py` cannot run in your environment, use `python nlm_tui.py` or `python nlm_tui_en.py`.
+
 ### TUI Key Bindings
 
 | Key | Action |
@@ -265,10 +302,11 @@ notebooklm_client.py    <- API client (batchexecute RPC)
 ├── nlm_backup.py       <- backup tool
 ├── nlm_upload.py       <- upload/restore tool
 ├── nlm_tui.py          <- TUI notebook browser + batch backup (Japanese UI)
-└── nlm_tui_en.py       <- TUI notebook browser + batch backup (English UI)
+├── nlm_tui_en.py       <- TUI notebook browser + batch backup (English UI)
+└── nlm_tui_curses.py   <- Curses-based TUI notebook browser + batch backup (experimental)
 ```
 
-- Zero third-party runtime dependencies (`urllib`, `http.cookiejar`, etc.)
+- Core tools keep zero third-party runtime dependencies (`urllib`, `http.cookiejar`, etc.)
 - Browser support: Edge, Chrome, Brave, Firefox
 - Transport: batchexecute RPC over HTTPS
 
@@ -285,6 +323,24 @@ python nlm_login.py
 ### Why are PDFs downloaded as images?
 
 This is expected. NotebookLM stores uploaded PDF content as rendered page images, so backups save PNG pages instead of the original PDF binary.
+
+### `ModuleNotFoundError: No module named '_curses'` on Windows
+
+Your current Python build does not provide curses bindings.
+
+Try one of:
+
+```bash
+pip install windows-curses
+```
+
+or run the curses TUI with a Python build/version where curses works (for example):
+
+```bash
+~/.pyenv/pyenv-win/versions/3.12.0/python.exe nlm_tui_curses.py
+```
+
+If neither is possible, use `nlm_tui.py` / `nlm_tui_en.py`.
 
 ## License
 
