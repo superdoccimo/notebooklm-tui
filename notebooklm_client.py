@@ -108,7 +108,11 @@ class NotebookLMClient:
             domain = c.get("domain", ".google.com")
             path = c.get("path", "/")
             secure = c.get("secure", True)
-            expires = int(c.get("expires", 0)) or None
+            try:
+                expires_raw = c.get("expires", 0)
+                expires = int(float(expires_raw)) or None
+            except (TypeError, ValueError):
+                expires = None
 
             # .google.com 用
             cookie = http.cookiejar.Cookie(

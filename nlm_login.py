@@ -50,7 +50,7 @@ def _detect_lang() -> str:
     if env in ("ja", "en"):
         return env
     try:
-        loc = locale.getdefaultlocale()[0] or ""
+        loc = locale.getlocale()[0] or ""
     except Exception:
         loc = ""
     return "ja" if loc.startswith("ja") else "en"

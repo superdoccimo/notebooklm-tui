@@ -192,7 +192,8 @@ def main():
         if not backup_dir.is_dir():
             print(f"[ERROR] ディレクトリが見つかりません: {args.restore}", file=sys.stderr)
             sys.exit(1)
-        restore_backup(client, backup_dir)
+        if not restore_backup(client, backup_dir):
+            sys.exit(1)
         return
 
     # 既存ノートブックへの追加

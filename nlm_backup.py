@@ -39,6 +39,20 @@ def sanitize_filename(name: str) -> str:
     return re.sub(r'[<>:"/\\|?*]', '_', name).strip()
 
 
+def _unique_path(path: Path) -> Path:
+    """既存パスと重複しないパスを返す"""
+    if not path.exists():
+        return path
+    stem = path.stem
+    suffix = path.suffix
+    i = 2
+    while True:
+        candidate = path.with_name(f"{stem}_{i}{suffix}")
+        if not candidate.exists():
+            return candidate
+        i += 1
+
+
 # ---------------------------------------------------------------------------
 # ソースの保存
 # ---------------------------------------------------------------------------
@@ -47,7 +61,7 @@ def save_text_source(client: NotebookLMClient, content: dict, out_dir: Path) -> 
     title = sanitize_filename(content.get("title", "untitled"))
     if not title.endswith(".md"):
         title = Path(title).stem + ".md"
-    dest = out_dir / "sources" / title
+    dest = _unique_path(out_dir / "sources" / title)
     dest.parent.mkdir(parents=True, exist_ok=True)
     with open(dest, "w", encoding="utf-8") as f:
         f.write(content.get("content", ""))
@@ -64,12 +78,12 @@ def save_image_source(client: NotebookLMClient, content: dict, out_dir: Path) ->
     saved = []
     if len(urls) == 1:
         ext = Path(title).suffix or ".png"
-        dest = img_dir / (Path(title).stem + ext)
+        dest = _unique_path(img_dir / (Path(title).stem + ext))
         if client.download_url(urls[0], dest):
             saved.append(dest)
     else:
         for i, url in enumerate(urls, 1):
-            dest = img_dir / f"{Path(title).stem}_p{i}.png"
+            dest = _unique_path(img_dir / f"{Path(title).stem}_p{i}.png")
             if client.download_url(url, dest):
                 saved.append(dest)
     return saved
@@ -78,7 +92,7 @@ def save_image_source(client: NotebookLMClient, content: dict, out_dir: Path) ->
 def save_pdf_source(client: NotebookLMClient, content: dict, out_dir: Path) -> list[Path]:
     title = sanitize_filename(content.get("title", "document"))
     stem = Path(title).stem
-    pdf_dir = out_dir / "sources" / stem
+    pdf_dir = _unique_path(out_dir / "sources" / stem)
     pdf_dir.mkdir(parents=True, exist_ok=True)
 
     raw = content.get("content", "")
