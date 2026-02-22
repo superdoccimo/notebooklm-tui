@@ -594,6 +594,9 @@ class NotebookLMClient:
             elif type_code == 8:  # slide_deck
                 if len(art) > 16 and art[16] and len(art[16]) > 3:
                     info["download_url"] = art[16][3]
+                    # PPTX download URL (art[16][4], available on newer slides)
+                    if len(art[16]) > 4 and isinstance(art[16][4], str) and art[16][4].startswith("http"):
+                        info["pptx_url"] = art[16][4]
                     # 各ページの画像URLを抽出
                     pages = art[16][2] if len(art[16]) > 2 and isinstance(art[16][2], list) else []
                     page_images = []
@@ -657,6 +660,14 @@ class NotebookLMClient:
             return self.download_url(artifact["download_url"], dest_path)
 
         return False
+
+    def download_artifact_pptx(self, artifact: dict, dest_path: str | Path) -> bool:
+        """スライドデッキの PPTX をダウンロード"""
+        if "pptx_url" not in artifact or not artifact["pptx_url"]:
+            return False
+        dest_path = Path(dest_path)
+        dest_path.parent.mkdir(parents=True, exist_ok=True)
+        return self.download_url(artifact["pptx_url"], dest_path)
 
     def download_artifact_pages(self, artifact: dict, dest_dir: str | Path) -> list[Path]:
         """アーティファクトのページ画像をダウンロード（slide_deck 用）"""

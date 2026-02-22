@@ -418,6 +418,10 @@ def _backup_notebook(
         else:
             art_fail += 1
             failed_artifacts.append(art)
+        # Download PPTX for slide decks
+        if art.get("pptx_url"):
+            pptx_dest = dest.with_suffix(".pptx")
+            client.download_artifact_pptx(art, pptx_dest)
         # Download page images for slide deck artifacts.
         if art.get("page_images"):
             pages_dir = art_dir / dest.stem

@@ -375,6 +375,10 @@ def _backup_notebook(
         else:
             art_fail += 1
             failed_artifacts.append(art)
+        # スライドデッキの PPTX をダウンロード
+        if art.get("pptx_url"):
+            pptx_dest = dest.with_suffix(".pptx")
+            client.download_artifact_pptx(art, pptx_dest)
         # スライドデッキのページ画像をダウンロード
         if art.get("page_images"):
             pages_dir = art_dir / dest.stem

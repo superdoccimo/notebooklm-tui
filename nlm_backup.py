@@ -146,6 +146,15 @@ def save_artifacts(client: NotebookLMClient, artifacts: list[dict], out_dir: Pat
         else:
             print("FAIL")
 
+        # スライドデッキの PPTX をダウンロード
+        if art.get("pptx_url"):
+            pptx_dest = dest.with_suffix(".pptx")
+            print(f"    [{art_type}] → {pptx_dest.name} ... ", end="", flush=True)
+            if client.download_artifact_pptx(art, pptx_dest):
+                print("OK")
+            else:
+                print("FAIL")
+
         # スライドデッキのページ画像をダウンロード
         if art.get("page_images"):
             stem = dest.stem
