@@ -6,3 +6,9 @@ __pycache__/
 dist/
 build/
 .claude/
+.python-version
+
+# Local debug artifacts
+debug_*
+mindmap_dump_*.json
+nlm_tui*.log

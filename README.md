@@ -9,10 +9,10 @@ A zero-dependency NotebookLM backup and restore toolkit for CLI and terminal UI 
 - `nlm-upload`: Upload files/URLs and restore from backup folders
 - `nlm-tui`: Japanese UI terminal TUI
 - `nlm-tui-en`: English UI terminal TUI
-- `nlm-tui-curses` (script: `nlm_tui_curses.py`): Curses-based flicker-reduced TUI (experimental)
+- `nlm-tui-curses` (script: `nlm_tui_curses.py`): Optional curses-based flicker-reduced TUI (experimental)
 
-Core tools run on Python standard library only (no third-party packages required).
-`nlm_tui_curses.py` may require extra setup on Windows (see below).
+Core CLI tools and standard TUIs run on Python standard library only (no third-party packages required).
+On Windows/Python 3.14, prefer `nlm_tui.py` or `nlm_tui_en.py`. `nlm_tui_curses.py` may require extra setup on Windows (see below).
 
 ## Quick Start
 
@@ -44,12 +44,14 @@ python nlm_upload.py --restore ./downloads/My_Notebook/
 TUI example:
 
 ```bash
+# Recommended on Windows / Python 3.14 (no extra packages)
 # Interactive notebook browser + backup (Japanese UI)
 python nlm_tui.py
 
 # Interactive notebook browser + backup (English UI)
 python nlm_tui_en.py
 
+# Optional when curses is available
 # Interactive notebook browser + backup (curses / reduced flicker)
 python nlm_tui_curses.py
 ```
@@ -180,12 +182,12 @@ nlm-tui --log ./nlm_tui.log
 
 > If you did not run `pip install .`, use `python nlm_tui.py` instead.
 > For English UI without install, use `python nlm_tui_en.py`.
-> `nlm-tui` works on interactive terminals in Windows and Linux.
+> `nlm-tui` works on interactive terminals in Windows and Linux and is the recommended TUI on Windows/Python 3.14.
 > In upload menu (`u`), you can pass folder paths and upload multiple entries separated by `;`.
 
 ## Usage: `nlm_tui_curses.py` (Flicker-Reduced TUI, Experimental)
 
-This variant uses `curses` screen rendering to reduce terminal flicker compared to clear/redraw loops.
+This optional variant uses `curses` screen rendering to reduce terminal flicker compared to clear/redraw loops.
 
 ```bash
 # Start curses UI
@@ -202,6 +204,13 @@ python nlm_tui_curses.py --log ./nlm_tui_curses.log
 ```
 
 `nlm_tui_curses.py` is currently script-only and is not installed as a `nlm-tui-curses` command via `pip install .`.
+Use `python nlm_tui.py` / `python nlm_tui_en.py` as the default choice on Windows/Python 3.14.
+
+Flashcards and Quiz artifacts are exported in three files:
+
+- `.md` for human-readable backup
+- `.html` for the original NotebookLM artifact payload
+- `.json` for parsed structured data
 
 Windows notes:
 
@@ -213,7 +222,7 @@ Windows notes:
 ~/.pyenv/pyenv-win/versions/3.12.0/python.exe nlm_tui_curses.py
 ```
 
-If `nlm_tui_curses.py` cannot run in your environment, use `python nlm_tui.py` or `python nlm_tui_en.py`.
+If `nlm_tui_curses.py` cannot run in your environment, or you are on Python 3.14 without `windows-curses`, use `python nlm_tui.py` or `python nlm_tui_en.py`.
 
 ### TUI Key Bindings
 
@@ -225,7 +234,7 @@ If `nlm_tui_curses.py` cannot run in your environment, use `python nlm_tui.py` o
 | `b` | Backup selected notebooks (or current row if none selected) |
 | `u` | Upload menu (new notebook or append to current notebook) |
 | `x` | Retry only failed items from the last backup |
-| `f` | Toggle backup targets (Sources/Artifacts/Notes) |
+| `f` | Toggle backup targets (Sources/Artifacts/Notes/Mindmaps) |
 | `a` | Select all / clear all |
 | `r` | Refresh notebook list |
 | `q` | Quit (or go back from details view) |
@@ -258,6 +267,12 @@ downloads/
     │   ├── audio_overview.m4a
     │   ├── slide_deck.pdf
     │   ├── report.md
+    │   ├── flashcards.md
+    │   ├── flashcards.html
+    │   ├── flashcards.json
+    │   ├── quiz.md
+    │   ├── quiz.html
+    │   ├── quiz.json
     │   └── ...
     └── notes/                 # user-authored notes
         └── my_note.md
@@ -283,7 +298,8 @@ downloads/
 | Slide Deck | `.pdf` |
 | Report | `.md` |
 | Data Table | `.csv` |
-| Flashcards | `.md` |
+| Flashcards | `.md` + `.html` + `.json` |
+| Quiz | `.md` + `.html` + `.json` |
 | Infographic | `.png` |
 
 ### Notes
@@ -327,6 +343,7 @@ This is expected. NotebookLM stores uploaded PDF content as rendered page images
 ### `ModuleNotFoundError: No module named '_curses'` on Windows
 
 Your current Python build does not provide curses bindings.
+For Windows/Python 3.14, the default recommendation is to use `nlm_tui.py` / `nlm_tui_en.py`.
 
 Try one of:
 
@@ -340,7 +357,7 @@ or run the curses TUI with a Python build/version where curses works (for exampl
 ~/.pyenv/pyenv-win/versions/3.12.0/python.exe nlm_tui_curses.py
 ```
 
-If neither is possible, use `nlm_tui.py` / `nlm_tui_en.py`.
+If neither is possible, or you cannot install `windows-curses`, use `python nlm_tui.py` / `python nlm_tui_en.py`.
 
 ## License
 

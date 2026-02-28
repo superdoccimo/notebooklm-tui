@@ -9,6 +9,7 @@ Python 標準ライブラリのみで動作し、外部パッケージ依存は�
 """
 
 import http.cookiejar
+import html as html_lib
 import json
 import re
 import ssl
@@ -63,6 +64,17 @@ ARTIFACT_STATUS = {
     3: "completed",
     4: "failed",
 }
+
+APP_ARTIFACT_TYPES = {
+    1: "flashcards",
+    2: "quiz",
+    3: "prototype",
+}
+
+APP_ARTIFACT_DATA_PATTERN = re.compile(
+    r"<app-root\b[^>]*\bdata-app-data=\"(.*?)\"",
+    re.IGNORECASE | re.DOTALL,
+)
 
 
 class NotebookLMError(Exception):
@@ -531,6 +543,179 @@ class NotebookLMClient:
                     return result
         return None
 
+    def _artifact_variant_from_raw(self, art: list) -> str | None:
+        """type 4 アーティファクトのサブタイプを返す"""
+        try:
+            return APP_ARTIFACT_TYPES.get(art[9][1][0])
+        except (IndexError, TypeError):
+            return None
+
+    def _build_artifact_record(self, art: list) -> dict | None:
+        """生アーティファクト配列を共通 dict 形式へ変換"""
+        try:
+            art_id = art[0]
+            title = art[1] or "Untitled"
+            type_code = art[2]
+            status_code = art[4] if len(art) > 4 else None
+        except (IndexError, TypeError):
+            return None
+
+        art_type = ARTIFACT_TYPES.get(type_code, f"unknown_{type_code}")
+        status = ARTIFACT_STATUS.get(status_code, "unknown")
+        variant = self._artifact_variant_from_raw(art)
+        download_info = self._extract_artifact_download(art, type_code)
+
+        return {
+            "id": art_id,
+            "title": title,
+            "type": art_type,
+            "type_code": type_code,
+            "variant": variant,
+            "status": status,
+            "status_code": status_code,
+            "_raw": art,
+            **download_info,
+        }
+
+    def _extract_app_artifact_data(self, html_content: str) -> dict | None:
+        """type 4 HTML から app-root の JSON データを抽出"""
+        match = APP_ARTIFACT_DATA_PATTERN.search(html_content)
+        if not match:
+            return None
+        try:
+            return json.loads(html_lib.unescape(match.group(1)))
+        except json.JSONDecodeError:
+            return None
+
+    def _artifact_variant_from_data(self, artifact: dict, app_data: dict | None) -> str:
+        """詳細 HTML から得たデータを含めて type 4 の種別を判定"""
+        variant = artifact.get("variant")
+        if variant:
+            return variant
+        if isinstance(app_data, dict):
+            if "flashcards" in app_data:
+                return "flashcards"
+            if "quiz" in app_data:
+                return "quiz"
+        return artifact.get("type", "flashcards")
+
+    def _normalize_artifact_text(self, value) -> str:
+        if value is None:
+            return ""
+        return str(value).replace("\r\n", "\n").strip()
+
+    def _render_flashcards_markdown(
+        self,
+        title: str,
+        cards: list[dict],
+        html_name: str,
+        json_name: str,
+    ) -> str:
+        lines = [
+            f"# {title}",
+            "",
+            "- Artifact subtype: flashcards",
+            f"- Card count: {len(cards)}",
+            f"- Original HTML: `{html_name}`",
+            f"- Structured data: `{json_name}`",
+        ]
+        for i, card in enumerate(cards, 1):
+            front = self._normalize_artifact_text(card.get("f"))
+            back = self._normalize_artifact_text(card.get("b"))
+            lines.extend(
+                [
+                    "",
+                    f"## Card {i}",
+                    "",
+                    "**Front**",
+                    "",
+                    front or "(empty)",
+                    "",
+                    "**Back**",
+                    "",
+                    back or "(empty)",
+                ]
+            )
+        return "\n".join(lines).rstrip() + "\n"
+
+    def _render_quiz_markdown(
+        self,
+        title: str,
+        questions: list[dict],
+        html_name: str,
+        json_name: str,
+    ) -> str:
+        lines = [
+            f"# {title}",
+            "",
+            "- Artifact subtype: quiz",
+            f"- Question count: {len(questions)}",
+            f"- Original HTML: `{html_name}`",
+            f"- Structured data: `{json_name}`",
+        ]
+        for i, item in enumerate(questions, 1):
+            question = self._normalize_artifact_text(item.get("question"))
+            hint = self._normalize_artifact_text(item.get("hint"))
+            options = item.get("answerOptions", [])
+            correct_answers = [
+                self._normalize_artifact_text(option.get("text"))
+                for option in options
+                if isinstance(option, dict) and option.get("isCorrect")
+            ]
+            lines.extend(
+                [
+                    "",
+                    f"## Question {i}",
+                    "",
+                    question or "(empty)",
+                ]
+            )
+            if hint:
+                lines.extend(["", f"Hint: {hint}"])
+            if correct_answers:
+                lines.extend(["", f"Correct answer: {', '.join(correct_answers)}"])
+            if options:
+                lines.extend(["", "### Options", ""])
+                for option in options:
+                    if not isinstance(option, dict):
+                        continue
+                    marker = "x" if option.get("isCorrect") else " "
+                    text = self._normalize_artifact_text(option.get("text"))
+                    rationale = self._normalize_artifact_text(option.get("rationale"))
+                    lines.append(f"- [{marker}] {text or '(empty)'}")
+                    if rationale:
+                        lines.append(f"  Rationale: {rationale}")
+        return "\n".join(lines).rstrip() + "\n"
+
+    def _render_app_artifact_markdown(
+        self,
+        artifact: dict,
+        app_data: dict | None,
+        html_name: str,
+        json_name: str,
+    ) -> str:
+        title = artifact.get("title", "Untitled")
+        variant = self._artifact_variant_from_data(artifact, app_data)
+
+        if isinstance(app_data, dict):
+            if variant == "flashcards":
+                cards = [c for c in app_data.get("flashcards", []) if isinstance(c, dict)]
+                return self._render_flashcards_markdown(title, cards, html_name, json_name)
+            if variant == "quiz":
+                questions = [q for q in app_data.get("quiz", []) if isinstance(q, dict)]
+                return self._render_quiz_markdown(title, questions, html_name, json_name)
+
+        lines = [
+            f"# {title}",
+            "",
+            f"- Artifact subtype: {variant}",
+            f"- Original HTML: `{html_name}`",
+            f"- Structured data: `{json_name}`",
+            "",
+            "NotebookLM returned an HTML app for this artifact, but the structured payload could not be parsed.",
+        ]
+        return "\n".join(lines) + "\n"
+
     # ------------------------------------------------------------------
     # Artifacts (Studio)
     # ------------------------------------------------------------------
@@ -547,31 +732,17 @@ class NotebookLMClient:
 
         artifacts = []
         for art in result[0]:
-            try:
-                art_id = art[0]
-                title = art[1] or "Untitled"
-                type_code = art[2]
-                status_code = art[4] if len(art) > 4 else None
-
-                art_type = ARTIFACT_TYPES.get(type_code, f"unknown_{type_code}")
-                status = ARTIFACT_STATUS.get(status_code, "unknown")
-
-                # ダウンロードURL/コンテンツの抽出
-                download_info = self._extract_artifact_download(art, type_code)
-
-                artifacts.append({
-                    "id": art_id,
-                    "title": title,
-                    "type": art_type,
-                    "type_code": type_code,
-                    "status": status,
-                    "status_code": status_code,
-                    "_raw": art,  # ダウンロード時に使用
-                    **download_info,
-                })
-            except (IndexError, TypeError):
-                continue
+            record = self._build_artifact_record(art)
+            if record:
+                artifacts.append(record)
         return artifacts
+
+    def get_artifact(self, artifact_id: str) -> dict | None:
+        """アーティファクト詳細を取得"""
+        result = self._batchexecute("v9rmvd", [artifact_id, [2]])
+        if not result or not isinstance(result[0], list):
+            return None
+        return self._build_artifact_record(result[0])
 
     def _extract_artifact_download(self, art: list, type_code: int) -> dict:
         """アーティファクトからダウンロード情報を抽出"""
@@ -608,6 +779,13 @@ class NotebookLMClient:
                             continue
                     if page_images:
                         info["page_images"] = page_images
+            elif type_code == 4:  # flashcards / quiz
+                html_content = art[9][0] if len(art) > 9 and art[9] else ""
+                if isinstance(html_content, str) and "<html" in html_content.lower():
+                    info["app_html"] = html_content
+                    app_data = self._extract_app_artifact_data(html_content)
+                    if app_data is not None:
+                        info["app_data"] = app_data
             elif type_code == 9:  # data_table
                 try:
                     info["content"] = self._extract_data_table(art[18])
@@ -644,10 +822,56 @@ class NotebookLMClient:
             return ""
         return buf.getvalue()
 
+    def _download_app_artifact(self, artifact: dict, dest_path: str | Path) -> bool:
+        """type 4 アーティファクトを Markdown + HTML + JSON で保存"""
+        dest_path = Path(dest_path)
+        dest_path.parent.mkdir(parents=True, exist_ok=True)
+
+        detail = artifact
+        if not artifact.get("app_html"):
+            detail = self.get_artifact(artifact.get("id", ""))
+            if not detail:
+                return False
+
+        html_content = detail.get("app_html")
+        if not isinstance(html_content, str) or not html_content:
+            return False
+
+        app_data = detail.get("app_data")
+        if app_data is None:
+            app_data = self._extract_app_artifact_data(html_content)
+
+        html_dest = dest_path.with_suffix(".html")
+        json_dest = dest_path.with_suffix(".json")
+        markdown = self._render_app_artifact_markdown(detail, app_data, html_dest.name, json_dest.name)
+
+        with open(dest_path, "w", encoding="utf-8") as f:
+            f.write(markdown)
+        with open(html_dest, "w", encoding="utf-8") as f:
+            f.write(html_content)
+        with open(json_dest, "w", encoding="utf-8") as f:
+            json.dump(
+                {
+                    "id": detail.get("id"),
+                    "title": detail.get("title"),
+                    "type": detail.get("type"),
+                    "variant": self._artifact_variant_from_data(detail, app_data),
+                    "status": detail.get("status"),
+                    "data": app_data,
+                },
+                f,
+                ensure_ascii=False,
+                indent=2,
+            )
+        return True
+
     def download_artifact(self, artifact: dict, dest_path: str | Path) -> bool:
         """アーティファクトをファイルにダウンロード"""
         dest_path = Path(dest_path)
         dest_path.parent.mkdir(parents=True, exist_ok=True)
+
+        if artifact.get("type_code") == 4:
+            return self._download_app_artifact(artifact, dest_path)
 
         # インラインコンテンツの場合（report, data_table）
         if "content" in artifact and artifact["content"]:
@@ -725,6 +949,44 @@ class NotebookLMClient:
             except (IndexError, TypeError):
                 continue
         return notes
+
+    def list_mindmaps(self, notebook_id: str) -> list[dict]:
+        """ノート一覧からマインドマップだけを抽出"""
+        result = self._batchexecute(
+            "cFji9", [notebook_id],
+            source_path=f"/notebook/{notebook_id}",
+        )
+        if not result or not isinstance(result[0], list):
+            return []
+
+        mindmaps = []
+        for item in result[0]:
+            try:
+                if not isinstance(item, list) or len(item) < 2:
+                    continue
+                note_id = item[0]
+                detail = item[1]
+                if detail is None:
+                    continue
+
+                content = detail[1] if len(detail) > 1 else ""
+                title = detail[4] if len(detail) > 4 else ""
+
+                if isinstance(content, str):
+                    try:
+                        parsed = json.loads(content)
+                        if isinstance(parsed, dict) and ("children" in parsed or "nodes" in parsed):
+                            mindmaps.append({
+                                "id": note_id,
+                                "title": title or "Untitled",
+                                "content": content,
+                                "data": parsed,
+                            })
+                    except (json.JSONDecodeError, TypeError):
+                        pass
+            except (IndexError, TypeError):
+                continue
+        return mindmaps
 
     # ------------------------------------------------------------------
     # Download utility

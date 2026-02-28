@@ -10,7 +10,7 @@ Key bindings:
   b             : Backup selected notebooks (current if none selected)
   u             : Upload menu (create new / add to existing)
   x             : Retry last failed items
-  f             : Backup filter (Sources/Artifacts/Notes)
+  f             : Backup filter (Sources/Artifacts/Notes/Mindmaps)
   r             : Reload notebook list
   a             : Select all / Deselect all
   q             : Quit / Back
@@ -19,7 +19,6 @@ Key bindings:
 from __future__ import annotations
 
 import argparse
-import curses
 import json
 import locale
 import os
@@ -30,8 +29,15 @@ from datetime import datetime
 from pathlib import Path
 from typing import Callable
 
+try:
+    import curses
+    _CURSES_IMPORT_ERROR = None
+except (ImportError, ModuleNotFoundError) as exc:
+    curses = None
+    _CURSES_IMPORT_ERROR = exc
+
 from notebooklm_client import AuthenticationError, NotebookLMClient, NotebookLMError
-from nlm_backup import ARTIFACT_EXTENSIONS, format_timestamp, sanitize_filename
+from nlm_backup import ARTIFACT_EXTENSIONS, format_timestamp, sanitize_filename, mindmap_to_markdown
 from nlm_upload import TEXT_EXTENSIONS, UPLOAD_FILE_TYPES, collect_files
 
 
@@ -44,6 +50,7 @@ class BackupSelection:
     sources: bool = True
     artifacts: bool = True
     notes: bool = True
+    mindmaps: bool = True
 
     def label(self) -> str:
         return " ".join(
@@ -51,11 +58,12 @@ class BackupSelection:
                 "S:on" if self.sources else "S:off",
                 "A:on" if self.artifacts else "A:off",
                 "N:on" if self.notes else "N:off",
+                "M:on" if self.mindmaps else "M:off",
             ]
         )
 
     def enabled_count(self) -> int:
-        return int(self.sources) + int(self.artifacts) + int(self.notes)
+        return int(self.sources) + int(self.artifacts) + int(self.notes) + int(self.mindmaps)
 
 
 # ---------------------------------------------------------------------------
@@ -100,7 +108,7 @@ def _toggle_selection_component(selection: BackupSelection, component: str) -> b
 
 
 def _failure_count(failed: dict) -> int:
-    return len(failed.get("sources", [])) + len(failed.get("artifacts", [])) + len(failed.get("notes", []))
+    return len(failed.get("sources", [])) + len(failed.get("artifacts", [])) + len(failed.get("notes", [])) + len(failed.get("mindmaps", []))
 
 
 def _entry_failure_count(entry: dict) -> int:
@@ -144,7 +152,7 @@ def _save_image_source(client: NotebookLMClient, content: dict, out_dir: Path) -
 def _save_pdf_source(client: NotebookLMClient, content: dict, out_dir: Path) -> list[Path]:
     title = sanitize_filename(content.get("title", "document"))
     stem = Path(title).stem
-    pdf_dir = out_dir / "sources" / stem
+    pdf_dir = _unique_path(out_dir / "sources" / stem)
     pdf_dir.mkdir(parents=True, exist_ok=True)
 
     raw = content.get("content", "")
@@ -156,6 +164,77 @@ def _save_pdf_source(client: NotebookLMClient, content: dict, out_dir: Path) -> 
         if client.download_url(url, dest):
             saved.append(dest)
     return saved
+
+
+def _artifact_variant(artifact: dict) -> str | None:
+    variant = artifact.get("variant")
+    if isinstance(variant, str) and variant:
+        return variant
+    raw = artifact.get("_raw")
+    try:
+        subtype = raw[9][1][0]
+    except (IndexError, TypeError):
+        return None
+    return {
+        1: "flashcards",
+        2: "quiz",
+    }.get(subtype)
+
+
+def _artifact_stem(artifact: dict) -> str:
+    raw_title = sanitize_filename(artifact.get("title", "") or "")
+    if raw_title:
+        return Path(raw_title).stem
+    return _artifact_variant(artifact) or artifact.get("type", "artifact")
+
+
+def _save_type4_artifact(artifact: dict, dest_path: Path) -> bool:
+    raw = artifact.get("_raw")
+    if not isinstance(raw, list):
+        return False
+
+    variant = _artifact_variant(artifact) or artifact.get("type", "flashcards")
+    title = artifact.get("title", "Untitled")
+    status = artifact.get("status", "unknown")
+    language = None
+    prompt = ""
+
+    try:
+        language = raw[9][1][3]
+    except (IndexError, TypeError):
+        pass
+
+    try:
+        prompt = raw[9][0] or ""
+    except (IndexError, TypeError):
+        pass
+
+    json_dest = _unique_path(dest_path.with_suffix(".json"))
+    lines = [
+        f"# {title}",
+        "",
+        f"- Artifact subtype: {variant}",
+        f"- Status: {status}",
+    ]
+    if language:
+        lines.append(f"- Language: {language}")
+    lines.extend(
+        [
+            "- Backup note: NotebookLM did not expose exportable card bodies in the artifact list response.",
+            f"- Raw artifact metadata: `{json_dest.name}`",
+        ]
+    )
+    if prompt:
+        lines.extend(["", "## Prompt", "", prompt])
+
+    try:
+        with open(dest_path, "w", encoding="utf-8") as f:
+            f.write("\n".join(lines) + "\n")
+        with open(json_dest, "w", encoding="utf-8") as f:
+            json.dump(raw, f, ensure_ascii=False, indent=2)
+    except OSError:
+        return False
+    return True
 
 
 def _build_detail_lines(client: NotebookLMClient, nb: dict) -> list[str]:
@@ -170,7 +249,8 @@ def _build_detail_lines(client: NotebookLMClient, nb: dict) -> list[str]:
     lines.append("")
     lines.append(f"Artifacts ({len(artifacts)})")
     for art in artifacts:
-        lines.append(f"  - [{art.get('status', 'unknown')}] [{art.get('type', 'unknown')}] {art.get('title', 'Untitled')}")
+        art_label = _artifact_variant(art) or art.get("type", "unknown")
+        lines.append(f"  - [{art.get('status', 'unknown')}] [{art_label}] {art.get('title', 'Untitled')}")
     lines.append("")
     lines.append(f"Notes ({len(notes)})")
     for note in notes:
@@ -317,8 +397,12 @@ def _backup_notebook(
         notes = retry_plan.get("notes", []) if retry_plan is not None else client.list_notes(notebook_id)
     else:
         notes = []
+    if selection.mindmaps:
+        mindmaps = retry_plan.get("mindmaps", []) if retry_plan is not None else client.list_mindmaps(notebook_id)
+    else:
+        mindmaps = []
 
-    total = max(1, 1 + len(sources) + len(artifacts) + len(notes))
+    total = max(1, 1 + len(sources) + len(artifacts) + len(notes) + len(mindmaps))
     done = 0
 
     def step(message: str):
@@ -329,6 +413,7 @@ def _backup_notebook(
     failed_sources = []
     failed_artifacts = []
     failed_notes = []
+    failed_mindmaps = []
     step("Saving metadata")
 
     src_ok = 0
@@ -366,8 +451,14 @@ def _backup_notebook(
         art_type = art.get("type", "unknown")
         art_title = art.get("title", "untitled")
         ext = ARTIFACT_EXTENSIONS.get(art_type, ".bin")
-        dest = _unique_path(art_dir / f"{art_type}{ext}")
-        if client.download_artifact(art, dest):
+        stem = _artifact_stem(art)
+        dest = _unique_path(art_dir / f"{stem}{ext}")
+
+        saved = client.download_artifact(art, dest)
+        if not saved and art.get("type_code") == 4:
+            saved = _save_type4_artifact(art, dest)
+
+        if saved:
             art_ok += 1
         else:
             art_fail += 1
@@ -400,26 +491,54 @@ def _backup_notebook(
             failed_notes.append({"title": note.get("title", "untitled"), "content": content})
         step(f"Notes {i}/{len(notes)}: {note_title}")
 
+    mm_ok = 0
+    mm_fail = 0
+    if mindmaps:
+        mm_dir = out_dir / "mindmaps"
+        mm_dir.mkdir(parents=True, exist_ok=True)
+        for i, mm in enumerate(mindmaps, 1):
+            mm_title = sanitize_filename(mm.get("title", "untitled"))
+            data = mm.get("data", {})
+            json_name = mm_title if mm_title.endswith(".json") else mm_title + ".json"
+            json_dest = _unique_path(mm_dir / json_name)
+            try:
+                with open(json_dest, "w", encoding="utf-8") as f:
+                    json.dump(data, f, ensure_ascii=False, indent=2)
+                md_name = Path(json_dest.stem).stem + ".md"
+                md_dest = _unique_path(mm_dir / md_name)
+                md_content = f"# {data.get('name', mm_title)}\n\n{mindmap_to_markdown(data)}\n"
+                with open(md_dest, "w", encoding="utf-8") as f:
+                    f.write(md_content)
+                mm_ok += 1
+            except OSError:
+                mm_fail += 1
+                failed_mindmaps.append(mm)
+            step(f"Mindmaps {i}/{len(mindmaps)}: {mm_title}")
+
     summary = {
         "sources_total": len(sources),
         "artifacts_total": len(artifacts),
         "notes_total": len(notes),
+        "mindmaps_total": len(mindmaps),
         "sources_ok": src_ok,
         "sources_fail": src_fail,
         "artifacts_ok": art_ok,
         "artifacts_fail": art_fail,
         "notes_ok": note_ok,
         "notes_fail": note_fail,
+        "mindmaps_ok": mm_ok,
+        "mindmaps_fail": mm_fail,
         "failed": {
             "sources": failed_sources,
             "artifacts": failed_artifacts,
             "notes": failed_notes,
+            "mindmaps": failed_mindmaps,
         },
     }
     if logger:
         logger(
             f"Backup summary notebook={title} "
-            f"S={src_ok}/{len(sources)} A={art_ok}/{len(artifacts)} N={note_ok}/{len(notes)} "
+            f"S={src_ok}/{len(sources)} A={art_ok}/{len(artifacts)} N={note_ok}/{len(notes)} M={mm_ok}/{len(mindmaps)} "
             f"failures={_failure_count(summary['failed'])}"
         )
     return summary
@@ -462,7 +581,8 @@ def _run_backup_batch(
                 f"{nb_title}  "
                 f"S:{summary['sources_ok']}/{summary['sources_total']}  "
                 f"A:{summary['artifacts_ok']}/{summary['artifacts_total']}  "
-                f"N:{summary['notes_ok']}/{summary['notes_total']}"
+                f"N:{summary['notes_ok']}/{summary['notes_total']}  "
+                f"M:{summary['mindmaps_ok']}/{summary['mindmaps_total']}"
             )
             count = _failure_count(summary["failed"])
             if count:
@@ -533,6 +653,7 @@ class CursesTUI:
         self.status = "Ready"
         self.h = 0
         self.w = 0
+        self.colors_enabled = False
         self._init_colors()
         self._update_dimensions()
         _append_log(self.log_path, "Session start mode=curses")
@@ -542,15 +663,31 @@ class CursesTUI:
     # ------------------------------------------------------------------ #
 
     def _init_colors(self):
-        curses.start_color()
-        curses.use_default_colors()
-        curses.init_pair(CP_HEADER, curses.COLOR_BLACK, curses.COLOR_CYAN)
-        curses.init_pair(CP_CURSOR, curses.COLOR_BLACK, curses.COLOR_WHITE)
-        curses.init_pair(CP_SELECTED, curses.COLOR_YELLOW, -1)
-        curses.init_pair(CP_CURSOR_SELECTED, curses.COLOR_YELLOW, curses.COLOR_WHITE)
-        curses.init_pair(CP_FOOTER, curses.COLOR_WHITE, curses.COLOR_BLUE)
-        curses.init_pair(CP_PROGRESS, curses.COLOR_GREEN, -1)
-        curses.init_pair(CP_ERROR, curses.COLOR_RED, -1)
+        if not curses.has_colors():
+            return
+        try:
+            curses.start_color()
+            curses.use_default_colors()
+            curses.init_pair(CP_HEADER, curses.COLOR_BLACK, curses.COLOR_CYAN)
+            curses.init_pair(CP_CURSOR, curses.COLOR_BLACK, curses.COLOR_WHITE)
+            curses.init_pair(CP_SELECTED, curses.COLOR_YELLOW, -1)
+            curses.init_pair(CP_CURSOR_SELECTED, curses.COLOR_YELLOW, curses.COLOR_WHITE)
+            curses.init_pair(CP_FOOTER, curses.COLOR_WHITE, curses.COLOR_BLUE)
+            curses.init_pair(CP_PROGRESS, curses.COLOR_GREEN, -1)
+            curses.init_pair(CP_ERROR, curses.COLOR_RED, -1)
+        except curses.error:
+            self.colors_enabled = False
+            return
+        self.colors_enabled = True
+
+    def _color_attr(self, pair_id: int, extra: int = 0) -> int:
+        if not self.colors_enabled:
+            return extra
+        try:
+            return curses.color_pair(pair_id) | extra
+        except curses.error:
+            self.colors_enabled = False
+            return extra
 
     def _update_dimensions(self):
         self.h, self.w = self.stdscr.getmaxyx()
@@ -622,7 +759,7 @@ class CursesTUI:
 
         # Header
         header = " NotebookLM TUI (curses) "
-        self._safe_addstr(self.stdscr, 0, 0, header.center(self.w), curses.color_pair(CP_HEADER) | curses.A_BOLD)
+        self._safe_addstr(self.stdscr, 0, 0, header.center(self.w), self._color_attr(CP_HEADER, curses.A_BOLD))
 
         help_line = "Up/Dn:Move Space:Select Enter:Detail b:Backup u:Upload x:Retry f:Filter a:All r:Reload q:Quit"
         self._safe_addstr(self.stdscr, 1, 0, help_line[:self.w])
@@ -656,11 +793,11 @@ class CursesTUI:
             line = f"{cursor} {mark} {idx + 1:>3}  {nb['title']}  (src:{nb['source_count']}, updated:{updated})"
 
             if is_cur and is_sel:
-                attr = curses.color_pair(CP_CURSOR_SELECTED) | curses.A_BOLD
+                attr = self._color_attr(CP_CURSOR_SELECTED, curses.A_BOLD)
             elif is_cur:
-                attr = curses.color_pair(CP_CURSOR)
+                attr = self._color_attr(CP_CURSOR)
             elif is_sel:
-                attr = curses.color_pair(CP_SELECTED) | curses.A_BOLD
+                attr = self._color_attr(CP_SELECTED, curses.A_BOLD)
             else:
                 attr = 0
 
@@ -685,8 +822,8 @@ class CursesTUI:
         if y_filter < 4:
             return
 
-        self._safe_addstr(self.stdscr, y_filter, 0, footer_filter.ljust(self.w - 1), curses.color_pair(CP_FOOTER))
-        self._safe_addstr(self.stdscr, y_status, 0, footer_status.ljust(self.w - 1), curses.color_pair(CP_FOOTER))
+        self._safe_addstr(self.stdscr, y_filter, 0, footer_filter.ljust(self.w - 1), self._color_attr(CP_FOOTER))
+        self._safe_addstr(self.stdscr, y_status, 0, footer_status.ljust(self.w - 1), self._color_attr(CP_FOOTER))
 
     # ------------------------------------------------------------------ #
     # Detail view with pad scrolling
@@ -702,7 +839,7 @@ class CursesTUI:
             pos = max(0, min(pos, max_pos))
 
             self.stdscr.erase()
-            self._safe_addstr(self.stdscr, 0, 0, f" {title} ", curses.color_pair(CP_HEADER) | curses.A_BOLD)
+            self._safe_addstr(self.stdscr, 0, 0, f" {title} ", self._color_attr(CP_HEADER, curses.A_BOLD))
             self._safe_addstr(self.stdscr, 1, 0, "Up/Dn:Scroll  PgUp/PgDn:Page  q/Enter:Back")
             self._safe_addstr(self.stdscr, 2, 0, "─" * min(self.w, 80))
 
@@ -715,7 +852,7 @@ class CursesTUI:
             # Scroll indicator
             if total_lines > view_h:
                 indicator = f" [{pos + 1}-{min(pos + view_h, total_lines)}/{total_lines}] "
-                self._safe_addstr(self.stdscr, self.h - 1, 0, indicator, curses.color_pair(CP_FOOTER))
+                self._safe_addstr(self.stdscr, self.h - 1, 0, indicator, self._color_attr(CP_FOOTER))
 
             self.stdscr.noutrefresh()
             curses.doupdate()
@@ -776,10 +913,10 @@ class CursesTUI:
         bar_w = max(10, min(60, self.w - 20))
 
         self.stdscr.erase()
-        self._safe_addstr(self.stdscr, 0, 0, " Backup Running ", curses.color_pair(CP_HEADER) | curses.A_BOLD)
+        self._safe_addstr(self.stdscr, 0, 0, " Backup Running ", self._color_attr(CP_HEADER, curses.A_BOLD))
         self._safe_addstr(self.stdscr, 2, 0, f"Notebook {nb_index}/{nb_total}: {nb_title}")
-        self._safe_addstr(self.stdscr, 3, 0, f"Current : {_bar(bar_w, nb_ratio)} {int(nb_ratio * 100):>3}%", curses.color_pair(CP_PROGRESS))
-        self._safe_addstr(self.stdscr, 4, 0, f"Overall : {_bar(bar_w, overall_ratio)} {int(overall_ratio * 100):>3}%", curses.color_pair(CP_PROGRESS))
+        self._safe_addstr(self.stdscr, 3, 0, f"Current : {_bar(bar_w, nb_ratio)} {int(nb_ratio * 100):>3}%", self._color_attr(CP_PROGRESS))
+        self._safe_addstr(self.stdscr, 4, 0, f"Overall : {_bar(bar_w, overall_ratio)} {int(overall_ratio * 100):>3}%", self._color_attr(CP_PROGRESS))
         self._safe_addstr(self.stdscr, 6, 0, f"Step: {message}")
         self._safe_addstr(self.stdscr, 8, 0, "Completed:")
 
@@ -798,9 +935,9 @@ class CursesTUI:
         bar_w = max(10, min(60, self.w - 20))
 
         self.stdscr.erase()
-        self._safe_addstr(self.stdscr, 0, 0, " Upload Running ", curses.color_pair(CP_HEADER) | curses.A_BOLD)
+        self._safe_addstr(self.stdscr, 0, 0, " Upload Running ", self._color_attr(CP_HEADER, curses.A_BOLD))
         self._safe_addstr(self.stdscr, 2, 0, f"Notebook: {nb_title}")
-        self._safe_addstr(self.stdscr, 3, 0, f"Progress: {_bar(bar_w, ratio)} {int(ratio * 100):>3}%", curses.color_pair(CP_PROGRESS))
+        self._safe_addstr(self.stdscr, 3, 0, f"Progress: {_bar(bar_w, ratio)} {int(ratio * 100):>3}%", self._color_attr(CP_PROGRESS))
         self._safe_addstr(self.stdscr, 5, 0, f"Step: {message}")
         self._safe_addstr(self.stdscr, 7, 0, "Completed:")
 
@@ -829,7 +966,7 @@ class CursesTUI:
         """Show messages and wait for Enter."""
         self._update_dimensions()
         self.stdscr.erase()
-        self._safe_addstr(self.stdscr, 0, 0, f" {title} ", curses.color_pair(CP_HEADER) | curses.A_BOLD)
+        self._safe_addstr(self.stdscr, 0, 0, f" {title} ", self._color_attr(CP_HEADER, curses.A_BOLD))
         for i, msg in enumerate(messages):
             if i + 2 >= self.h:
                 break
@@ -871,7 +1008,7 @@ class CursesTUI:
         while True:
             self._update_dimensions()
             self.stdscr.erase()
-            self._safe_addstr(self.stdscr, 0, 0, " Upload Menu ", curses.color_pair(CP_HEADER) | curses.A_BOLD)
+            self._safe_addstr(self.stdscr, 0, 0, " Upload Menu ", self._color_attr(CP_HEADER, curses.A_BOLD))
             self._safe_addstr(self.stdscr, 1, 0, "─" * min(self.w, 80))
             self._safe_addstr(self.stdscr, 3, 2, "1: Create new notebook and upload")
             self._safe_addstr(self.stdscr, 4, 2, "2: Upload to current notebook")
@@ -1001,15 +1138,16 @@ class CursesTUI:
         while True:
             self._update_dimensions()
             self.stdscr.erase()
-            self._safe_addstr(self.stdscr, 0, 0, " Backup Filter ", curses.color_pair(CP_HEADER) | curses.A_BOLD)
-            self._safe_addstr(self.stdscr, 1, 0, "1:Sources  2:Artifacts  3:Notes  Enter/q:Back")
+            self._safe_addstr(self.stdscr, 0, 0, " Backup Filter ", self._color_attr(CP_HEADER, curses.A_BOLD))
+            self._safe_addstr(self.stdscr, 1, 0, "1:Sources  2:Artifacts  3:Notes  4:Mindmaps  Enter/q:Back")
             self._safe_addstr(self.stdscr, 2, 0, "─" * min(self.w, 50))
             self._safe_addstr(self.stdscr, 4, 2, f"1 Sources  : {'ON ' if self.selection.sources else 'OFF'}")
             self._safe_addstr(self.stdscr, 5, 2, f"2 Artifacts: {'ON ' if self.selection.artifacts else 'OFF'}")
             self._safe_addstr(self.stdscr, 6, 2, f"3 Notes    : {'ON ' if self.selection.notes else 'OFF'}")
-            self._safe_addstr(self.stdscr, 8, 2, f"Current: {self.selection.label()}")
+            self._safe_addstr(self.stdscr, 7, 2, f"4 Mindmaps : {'ON ' if self.selection.mindmaps else 'OFF'}")
+            self._safe_addstr(self.stdscr, 9, 2, f"Current: {self.selection.label()}")
             if self.status and self.status != "Ready":
-                self._safe_addstr(self.stdscr, 10, 2, self.status, curses.color_pair(CP_ERROR))
+                self._safe_addstr(self.stdscr, 11, 2, self.status, self._color_attr(CP_ERROR))
             self.stdscr.noutrefresh()
             curses.doupdate()
 
@@ -1024,6 +1162,9 @@ class CursesTUI:
                     self.status = "At least one must remain ON"
             elif key == "3":
                 if not _toggle_selection_component(self.selection, "notes"):
+                    self.status = "At least one must remain ON"
+            elif key == "4":
+                if not _toggle_selection_component(self.selection, "mindmaps"):
                     self.status = "At least one must remain ON"
             elif key == "resize":
                 pass
@@ -1108,7 +1249,10 @@ class CursesTUI:
     # ------------------------------------------------------------------ #
 
     def run(self):
-        curses.curs_set(0)  # Hide cursor
+        try:
+            curses.curs_set(0)  # Hide cursor
+        except curses.error:
+            pass
         self.stdscr.keypad(True)
         self.stdscr.timeout(-1)  # Blocking input
 
@@ -1164,6 +1308,14 @@ def main() -> int:
     parser.add_argument("--log", type=str, default=None, help="Path to log file (default: <output>/nlm_tui_curses.log)")
     args = parser.parse_args()
 
+    if _CURSES_IMPORT_ERROR is not None:
+        print(
+            "[ERROR] curses is not available in this Python build. "
+            "On Windows, install windows-curses or run with a Python build that includes curses.",
+            file=sys.stderr,
+        )
+        return 1
+
     if not sys.stdin.isatty() or not sys.stdout.isatty():
         print("[ERROR] nlm-tui-curses requires an interactive terminal.", file=sys.stderr)
         return 1
@@ -1191,6 +1343,9 @@ def main() -> int:
         curses.wrapper(_curses_main)
     except KeyboardInterrupt:
         return 130
+    except curses.error as e:
+        print(f"[ERROR] curses terminal initialization failed: {e}", file=sys.stderr)
+        return 1
     return 0
 
 

@@ -8,7 +8,7 @@ Main keys:
   b            : Batch backup selected notebooks (current row if none selected)
   u            : Upload menu (new notebook / append to current)
   x            : Retry only failed items from last backup
-  f            : Backup target filter (Sources/Artifacts/Notes)
+  f            : Backup target filter (Sources/Artifacts/Notes/Mindmaps)
   r            : Reload notebook list
   a            : Select all / clear all
   q            : Quit / back
@@ -42,7 +42,7 @@ except ImportError:  # pragma: no cover
     tty = None
 
 from notebooklm_client import AuthenticationError, NotebookLMClient, NotebookLMError
-from nlm_backup import ARTIFACT_EXTENSIONS, format_timestamp, sanitize_filename
+from nlm_backup import ARTIFACT_EXTENSIONS, format_timestamp, sanitize_filename, mindmap_to_markdown, save_mindmaps
 from nlm_upload import TEXT_EXTENSIONS, UPLOAD_FILE_TYPES
 
 
@@ -51,6 +51,7 @@ class BackupSelection:
     sources: bool = True
     artifacts: bool = True
     notes: bool = True
+    mindmaps: bool = True
 
     def label(self) -> str:
         return " ".join(
@@ -58,11 +59,12 @@ class BackupSelection:
                 "S:on" if self.sources else "S:off",
                 "A:on" if self.artifacts else "A:off",
                 "N:on" if self.notes else "N:off",
+                "M:on" if self.mindmaps else "M:off",
             ]
         )
 
     def enabled_count(self) -> int:
-        return int(self.sources) + int(self.artifacts) + int(self.notes)
+        return int(self.sources) + int(self.artifacts) + int(self.notes) + int(self.mindmaps)
 
 
 def _bar(width: int, ratio: float) -> str:
@@ -131,7 +133,7 @@ def _toggle_selection_component(selection: BackupSelection, component: str) -> b
 
 
 def _failure_count(failed: dict) -> int:
-    return len(failed.get("sources", [])) + len(failed.get("artifacts", [])) + len(failed.get("notes", []))
+    return len(failed.get("sources", [])) + len(failed.get("artifacts", [])) + len(failed.get("notes", [])) + len(failed.get("mindmaps", []))
 
 
 def _entry_failure_count(entry: dict) -> int:
@@ -175,7 +177,7 @@ def _save_image_source(client: NotebookLMClient, content: dict, out_dir: Path) -
 def _save_pdf_source(client: NotebookLMClient, content: dict, out_dir: Path) -> list[Path]:
     title = sanitize_filename(content.get("title", "document"))
     stem = Path(title).stem
-    pdf_dir = out_dir / "sources" / stem
+    pdf_dir = _unique_path(out_dir / "sources" / stem)
     pdf_dir.mkdir(parents=True, exist_ok=True)
 
     raw = content.get("content", "")
@@ -187,6 +189,28 @@ def _save_pdf_source(client: NotebookLMClient, content: dict, out_dir: Path) -> 
         if client.download_url(url, dest):
             saved.append(dest)
     return saved
+
+
+def _artifact_variant(artifact: dict) -> str | None:
+    variant = artifact.get("variant")
+    if isinstance(variant, str) and variant:
+        return variant
+    raw = artifact.get("_raw")
+    try:
+        subtype = raw[9][1][0]
+    except (IndexError, TypeError):
+        return None
+    return {
+        1: "flashcards",
+        2: "quiz",
+    }.get(subtype)
+
+
+def _artifact_stem(artifact: dict) -> str:
+    raw_title = sanitize_filename(artifact.get("title", "") or "")
+    if raw_title:
+        return Path(raw_title).stem
+    return _artifact_variant(artifact) or artifact.get("type", "artifact")
 
 
 def _build_detail_lines(client: NotebookLMClient, nb: dict) -> list[str]:
@@ -201,7 +225,8 @@ def _build_detail_lines(client: NotebookLMClient, nb: dict) -> list[str]:
     lines.append("")
     lines.append(f"Artifacts ({len(artifacts)})")
     for art in artifacts:
-        lines.append(f"  - [{art.get('status', 'unknown')}] [{art.get('type', 'unknown')}] {art.get('title', 'Untitled')}")
+        art_label = _artifact_variant(art) or art.get("type", "unknown")
+        lines.append(f"  - [{art.get('status', 'unknown')}] [{art_label}] {art.get('title', 'Untitled')}")
     lines.append("")
     lines.append(f"Notes ({len(notes)})")
     for note in notes:
@@ -363,8 +388,12 @@ def _backup_notebook(
         notes = retry_plan.get("notes", []) if retry_plan is not None else client.list_notes(notebook_id)
     else:
         notes = []
+    if selection.mindmaps:
+        mindmaps = retry_plan.get("mindmaps", []) if retry_plan is not None else client.list_mindmaps(notebook_id)
+    else:
+        mindmaps = []
 
-    total = max(1, 1 + len(sources) + len(artifacts) + len(notes))
+    total = max(1, 1 + len(sources) + len(artifacts) + len(notes) + len(mindmaps))
     done = 0
 
     def step(message: str):
@@ -375,6 +404,7 @@ def _backup_notebook(
     failed_sources = []
     failed_artifacts = []
     failed_notes = []
+    failed_mindmaps = []
     step("Save metadata")
 
     src_ok = 0
@@ -412,7 +442,8 @@ def _backup_notebook(
         art_type = art.get("type", "unknown")
         art_title = art.get("title", "untitled")
         ext = ARTIFACT_EXTENSIONS.get(art_type, ".bin")
-        dest = _unique_path(art_dir / f"{art_type}{ext}")
+        stem = _artifact_stem(art)
+        dest = _unique_path(art_dir / f"{stem}{ext}")
         if client.download_artifact(art, dest):
             art_ok += 1
         else:
@@ -447,26 +478,54 @@ def _backup_notebook(
             failed_notes.append({"title": note.get("title", "untitled"), "content": content})
         step(f"Notes {i}/{len(notes)}: {note_title}")
 
+    mm_ok = 0
+    mm_fail = 0
+    if mindmaps:
+        mm_dir = out_dir / "mindmaps"
+        mm_dir.mkdir(parents=True, exist_ok=True)
+        for i, mm in enumerate(mindmaps, 1):
+            mm_title = sanitize_filename(mm.get("title", "untitled"))
+            data = mm.get("data", {})
+            json_name = mm_title if mm_title.endswith(".json") else mm_title + ".json"
+            json_dest = _unique_path(mm_dir / json_name)
+            try:
+                with open(json_dest, "w", encoding="utf-8") as f:
+                    json.dump(data, f, ensure_ascii=False, indent=2)
+                md_name = Path(json_dest.stem).stem + ".md"
+                md_dest = _unique_path(mm_dir / md_name)
+                md_content = f"# {data.get('name', mm_title)}\n\n{mindmap_to_markdown(data)}\n"
+                with open(md_dest, "w", encoding="utf-8") as f:
+                    f.write(md_content)
+                mm_ok += 1
+            except OSError:
+                mm_fail += 1
+                failed_mindmaps.append(mm)
+            step(f"Mindmaps {i}/{len(mindmaps)}: {mm_title}")
+
     summary = {
         "sources_total": len(sources),
         "artifacts_total": len(artifacts),
         "notes_total": len(notes),
+        "mindmaps_total": len(mindmaps),
         "sources_ok": src_ok,
         "sources_fail": src_fail,
         "artifacts_ok": art_ok,
         "artifacts_fail": art_fail,
         "notes_ok": note_ok,
         "notes_fail": note_fail,
+        "mindmaps_ok": mm_ok,
+        "mindmaps_fail": mm_fail,
         "failed": {
             "sources": failed_sources,
             "artifacts": failed_artifacts,
             "notes": failed_notes,
+            "mindmaps": failed_mindmaps,
         },
     }
     if logger:
         logger(
             f"Backup summary notebook={title} "
-            f"S={src_ok}/{len(sources)} A={art_ok}/{len(artifacts)} N={note_ok}/{len(notes)} "
+            f"S={src_ok}/{len(sources)} A={art_ok}/{len(artifacts)} N={note_ok}/{len(notes)} M={mm_ok}/{len(mindmaps)} "
             f"failures={_failure_count(summary['failed'])}"
         )
     return summary
@@ -509,7 +568,8 @@ def _run_backup_batch(
                 f"{nb_title}  "
                 f"S:{summary['sources_ok']}/{summary['sources_total']}  "
                 f"A:{summary['artifacts_ok']}/{summary['artifacts_total']}  "
-                f"N:{summary['notes_ok']}/{summary['notes_total']}"
+                f"N:{summary['notes_ok']}/{summary['notes_total']}  "
+                f"M:{summary['mindmaps_ok']}/{summary['mindmaps_total']}"
             )
             count = _failure_count(summary["failed"])
             if count:
@@ -1049,11 +1109,12 @@ class TerminalFallbackTUI:
             self._render(
                 [
                     "Backup Target Filter",
-                    "1:Sources  2:Artifacts  3:Notes  Enter/q:Back",
+                    "1:Sources  2:Artifacts  3:Notes  4:Mindmaps  Enter/q:Back",
                     "-" * 50,
                     f"1 Sources  : {'ON ' if self.selection.sources else 'OFF'}",
                     f"2 Artifacts: {'ON ' if self.selection.artifacts else 'OFF'}",
                     f"3 Notes    : {'ON ' if self.selection.notes else 'OFF'}",
+                    f"4 Mindmaps : {'ON ' if self.selection.mindmaps else 'OFF'}",
                     "",
                     f"Current: {self.selection.label()}",
                 ]
@@ -1069,6 +1130,9 @@ class TerminalFallbackTUI:
                     self.status = "At least one target must stay ON"
             elif key == "3":
                 if not _toggle_selection_component(self.selection, "notes"):
+                    self.status = "At least one target must stay ON"
+            elif key == "4":
+                if not _toggle_selection_component(self.selection, "mindmaps"):
                     self.status = "At least one target must stay ON"
 
     def run(self):

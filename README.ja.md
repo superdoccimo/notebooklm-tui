@@ -7,10 +7,10 @@ NotebookLM のバックアップ＆リストア CLI/TUI ツール。
 - **nlm-upload** — ファイルやURLを一括アップロード、バックアップからの復元
 - **nlm-tui** — 日本語UIのTUIで選択・閲覧・一括バックアップ
 - **nlm-tui-en** — 英語UIのTUIで選択・閲覧・一括バックアップ
-- **nlm-tui-curses**（スクリプト: `nlm_tui_curses.py`）— curses ベースのちらつき抑制TUI（実験的）
+- **nlm-tui-curses**（スクリプト: `nlm_tui_curses.py`）— 任意利用の curses ベースちらつき抑制TUI（実験的）
 
-**コア機能は外部パッケージ依存ゼロ** — Python 標準ライブラリのみで動作します。  
-`nlm_tui_curses.py` は Windows 環境によって追加セットアップが必要です（後述）。
+**コアCLIと標準TUIは外部パッケージ依存ゼロ** — Python 標準ライブラリのみで動作します。  
+Windows / Python 3.14 では `nlm_tui.py` / `nlm_tui_en.py` の利用を推奨します。`nlm_tui_curses.py` は環境によって追加セットアップが必要です（後述）。
 
 ## Quick Start
 
@@ -42,12 +42,14 @@ python nlm_upload.py --restore ./downloads/My_Notebook/
 TUIで操作する場合：
 
 ```bash
+# Windows / Python 3.14 ではこちらを推奨
 # 日本語UI
 python nlm_tui.py
 
 # 英語UI
 python nlm_tui_en.py
 
+# curses が使える環境向けのオプション
 # curses UI（ちらつき抑制）
 python nlm_tui_curses.py
 ```
@@ -184,12 +186,12 @@ nlm-tui --log ./nlm_tui.log
 
 > `pip install .` していない場合は `nlm-tui` の代わりに `python nlm_tui.py` を使ってください。
 > 英語UIは `python nlm_tui_en.py`（または `nlm-tui-en`）を使ってください。
-> `nlm-tui` は Windows / Linux の対話式ターミナルで動作します（標準ライブラリのみ）。
+> `nlm-tui` は Windows / Linux の対話式ターミナルで動作します（標準ライブラリのみ）。Windows / Python 3.14 では標準推奨です。
 > `u` キーのアップロードメニューでは、フォルダパスを指定して空ノートブックへ一括投入できます（複数は `;` 区切り）。
 
 ## Usage: nlm_tui_curses.py（ちらつき抑制TUI・実験的）
 
-`curses` 描画で画面更新を行い、`clear/redraw` 方式よりちらつきを抑えるためのバリアントです。
+`curses` 描画で画面更新を行い、`clear/redraw` 方式よりちらつきを抑えるための任意バリアントです。
 
 ```bash
 # curses UIを起動
@@ -206,6 +208,13 @@ python nlm_tui_curses.py --log ./nlm_tui_curses.log
 ```
 
 `nlm_tui_curses.py` は現状スクリプト実行専用で、`pip install .` しても `nlm-tui-curses` コマンドは追加されません。
+Windows / Python 3.14 では、まず `python nlm_tui.py` / `python nlm_tui_en.py` を使ってください。
+
+Flashcards / Quiz は次の 3 ファイルで保存されます。
+
+- `.md`: 人が読むためのバックアップ
+- `.html`: NotebookLM が返した元の生成物
+- `.json`: 解析済みの構造化データ
 
 Windows での注意点:
 
@@ -217,7 +226,7 @@ Windows での注意点:
 ~/.pyenv/pyenv-win/versions/3.12.0/python.exe nlm_tui_curses.py
 ```
 
-実行できない場合は、`python nlm_tui.py` / `python nlm_tui_en.py` を利用してください。
+実行できない場合、または Python 3.14 で `windows-curses` を導入できない場合は、`python nlm_tui.py` / `python nlm_tui_en.py` を利用してください。
 
 ### キー操作
 
@@ -229,7 +238,7 @@ Windows での注意点:
 | `b` | 選択ノートブックを一括バックアップ（未選択時は現在行） |
 | `u` | アップロードメニュー（新規作成して投入 / 現在ノートブックへ追加） |
 | `x` | 直近バックアップの失敗項目のみ再試行 |
-| `f` | バックアップ対象フィルタ（Sources/Artifacts/Notes） |
+| `f` | バックアップ対象フィルタ（Sources/Artifacts/Notes/Mindmaps） |
 | `a` | 全選択/全解除 |
 | `r` | 一覧を再読み込み |
 | `q` | 終了（詳細画面では戻る） |
@@ -262,6 +271,12 @@ downloads/
     │   ├── audio_overview.m4a
     │   ├── slide_deck.pdf
     │   ├── report.md
+    │   ├── flashcards.md
+    │   ├── flashcards.html
+    │   ├── flashcards.json
+    │   ├── quiz.md
+    │   ├── quiz.html
+    │   ├── quiz.json
     │   └── ...
     └── notes/                 # ユーザーが作成したノート
         └── my_note.md
@@ -285,7 +300,8 @@ downloads/
 | Slide Deck | `.pdf` |
 | Report | `.md` |
 | Data Table | `.csv` |
-| Flashcards | `.md` |
+| Flashcards | `.md` + `.html` + `.json` |
+| Quiz | `.md` + `.html` + `.json` |
 | Infographic | `.png` |
 
 ### Notes
@@ -328,7 +344,7 @@ python nlm_login.py
 
 ### Windows で `ModuleNotFoundError: No module named '_curses'` が出る
 
-現在の Python ビルドに curses バインディングが含まれていません。
+現在の Python ビルドに curses バインディングが含まれていません。Windows / Python 3.14 では `nlm_tui.py` / `nlm_tui_en.py` の利用を標準推奨としています。
 
 次のいずれかを試してください:
 
@@ -342,7 +358,7 @@ pip install windows-curses
 ~/.pyenv/pyenv-win/versions/3.12.0/python.exe nlm_tui_curses.py
 ```
 
-上記が難しい場合は `nlm_tui.py` / `nlm_tui_en.py` を使用してください。
+上記が難しい場合、または `windows-curses` を導入できない場合は `python nlm_tui.py` / `python nlm_tui_en.py` を使用してください。
 
 ## License
 

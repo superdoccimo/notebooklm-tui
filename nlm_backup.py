@@ -197,6 +197,56 @@ def save_notes(notes: list[dict], out_dir: Path) -> int:
 
 
 # ---------------------------------------------------------------------------
+# マインドマップの保存
+# ---------------------------------------------------------------------------
+
+def mindmap_to_markdown(node: dict, indent: int = 0) -> str:
+    """マインドマップのツリー構造を Markdown リストに変換"""
+    prefix = "  " * indent + "- "
+    lines = [prefix + node.get("name", "")]
+    for child in node.get("children", []):
+        lines.append(mindmap_to_markdown(child, indent + 1))
+    return "\n".join(lines)
+
+
+def save_mindmaps(mindmaps: list[dict], out_dir: Path) -> int:
+    if not mindmaps:
+        return 0
+    mm_dir = out_dir / "mindmaps"
+    mm_dir.mkdir(parents=True, exist_ok=True)
+    count = 0
+
+    for mm in mindmaps:
+        title = sanitize_filename(mm.get("title", "untitled"))
+        data = mm.get("data", {})
+
+        # JSON として保存
+        json_name = title if title.endswith(".json") else title + ".json"
+        json_dest = _unique_path(mm_dir / json_name)
+        print(f"    {json_dest.name} ... ", end="", flush=True)
+        try:
+            with open(json_dest, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+            print("OK")
+        except OSError:
+            print("FAIL")
+            continue
+
+        # Markdown としても保存
+        md_name = Path(json_dest.stem).stem + ".md"
+        md_dest = _unique_path(mm_dir / md_name)
+        try:
+            md_content = f"# {data.get('name', title)}\n\n{mindmap_to_markdown(data)}\n"
+            with open(md_dest, "w", encoding="utf-8") as f:
+                f.write(md_content)
+        except OSError:
+            pass
+
+        count += 1
+    return count
+
+
+# ---------------------------------------------------------------------------
 # メイン処理
 # ---------------------------------------------------------------------------
 
@@ -284,11 +334,17 @@ def download_notebook(client: NotebookLMClient, notebook_id: str, out_base: Path
     print(f"\n  [Notes] {len(notes)} 件")
     note_ok = save_notes(notes, out_dir) if notes else 0
 
+    # --- マインドマップ ---
+    mindmaps = client.list_mindmaps(notebook_id)
+    print(f"\n  [Mindmaps] {len(mindmaps)} 件")
+    mm_ok = save_mindmaps(mindmaps, out_dir) if mindmaps else 0
+
     # --- サマリー ---
     print(f"\n  --- 完了 ---")
     print(f"  Sources:   {src_ok}/{len(sources)}")
     print(f"  Artifacts: {art_ok}/{len(artifacts)}")
     print(f"  Notes:     {note_ok}/{len(notes)}")
+    print(f"  Mindmaps:  {mm_ok}/{len(mindmaps)}")
     print(f"  → {out_dir}\n")
 
 
