@@ -12,6 +12,11 @@ NotebookLM のバックアップ＆リストア CLI/TUI ツール。
 **コアCLIと標準TUIは外部パッケージ依存ゼロ** — Python 標準ライブラリのみで動作します。  
 Windows / Python 3.14 では `nlm_tui.py` / `nlm_tui_en.py` の利用を推奨します。`nlm_tui_curses.py` は環境によって追加セットアップが必要です（後述）。
 
+## 動画・記事
+
+- 動画（日本語）: https://youtu.be/yhRBLfuogvs
+- 記事: https://minokamo.tokyo/2026/02/18/9671/
+
 ## Quick Start
 
 ```bash

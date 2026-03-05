@@ -4,6 +4,12 @@
 
 A zero-dependency NotebookLM backup and restore toolkit for CLI and terminal UI workflows.
 
+## Video & Articles
+
+- Video (English): https://youtu.be/SJuvHdte7tw
+- Article (English): https://betelgeuse.work/notebooklm-tui/
+- Article (Spanish): https://ehrigite.com/notebooklm-tui/
+
 - `nlm-login`: Get NotebookLM auth cookies from your browser (Edge/Chrome/Brave/Firefox)
 - `nlm-backup`: Download sources, artifacts, and notes
 - `nlm-upload`: Upload files/URLs and restore from backup folders
