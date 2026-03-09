@@ -2,7 +2,18 @@
 
 [Japanese README](README.ja.md)
 
-A zero-dependency NotebookLM backup and restore toolkit for CLI and terminal UI workflows.
+**NotebookLM has no official backup. This tool lets you export everything.**
+
+> If this tool saved your NotebookLM data, please consider giving it a star.
+
+A zero-dependency Python toolkit that backs up and restores your entire NotebookLM workspace from the command line.
+
+- Download all sources (PDFs, text, images, URLs)
+- Export every artifact (audio, video, slides + PPTX, reports, infographics, data tables, mindmaps)
+- Save flashcards and quizzes
+- Backup notes
+- Restore notebooks from local backups
+- No external Python packages required
 
 ## Video & Articles
 
