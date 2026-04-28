@@ -301,6 +301,7 @@ BROWSER_REGISTRY = {
             "chromium-browser",
         ],
         "known_paths": [
+            "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
             "C:/Program Files/Google/Chrome/Application/chrome.exe",
             "C:/Program Files (x86)/Google/Chrome/Application/chrome.exe",
         ],
@@ -311,6 +312,7 @@ BROWSER_REGISTRY = {
         "name": "Brave Browser",
         "exe_names": ["brave.exe", "brave", "brave-browser", "brave-browser-stable"],
         "known_paths": [
+            "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
             "C:/Program Files/BraveSoftware/Brave-Browser/Application/brave.exe",
         ],
         "registry_key": r"SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\brave.exe",
@@ -320,6 +322,7 @@ BROWSER_REGISTRY = {
         "name": "Mozilla Firefox",
         "exe_names": ["firefox", "firefox.exe"],
         "known_paths": [
+            "/Applications/Firefox.app/Contents/MacOS/firefox",
             "/usr/bin/firefox",
             "/snap/bin/firefox",
             "C:/Program Files/Mozilla Firefox/firefox.exe",
