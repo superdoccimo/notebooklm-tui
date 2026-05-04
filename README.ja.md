@@ -18,7 +18,7 @@ NotebookLM のデータを丸ごとバックアップ＆リストアできる CL
 - **nlm-upload** — ファイルやURLを一括アップロード、バックアップからの復元
 - **nlm-tui** — 日本語UIのTUIで選択・閲覧・一括バックアップ
 - **nlm-tui-en** — 英語UIのTUIで選択・閲覧・一括バックアップ
-- **nlm-tui-curses**（スクリプト: `nlm_tui_curses.py`）— 任意利用の curses ベースちらつき抑制TUI（実験的）
+- **nlm-tui-curses** — 任意利用の curses ベースちらつき抑制TUI（実験的・Windowsでは追加セットアップが必要な場合あり）
 
 **コアCLIと標準TUIは外部パッケージ依存ゼロ** — Python 標準ライブラリのみで動作します。  
 Windows / Python 3.14 では `nlm_tui.py` / `nlm_tui_en.py` の利用を推奨します。`nlm_tui_curses.py` は環境によって追加セットアップが必要です（後述）。
@@ -130,7 +130,7 @@ python nlm_backup.py --list
 
 ```bash
 pip install .
-# → nlm-backup, nlm-upload, nlm-login, nlm-tui, nlm-tui-en コマンドが使えるようになる
+# → nlm-backup, nlm-upload, nlm-login, nlm-tui, nlm-tui-en, nlm-tui-curses コマンドが使えるようになる
 ```
 
 ## Usage: nlm-backup (ダウンロード)
@@ -223,8 +223,8 @@ python nlm_tui_curses.py --cookies /path/to/cookies.json
 python nlm_tui_curses.py --log ./nlm_tui_curses.log
 ```
 
-`nlm_tui_curses.py` は現状スクリプト実行専用で、`pip install .` しても `nlm-tui-curses` コマンドは追加されません。
-Windows / Python 3.14 では、まず `python nlm_tui.py` / `python nlm_tui_en.py` を使ってください。
+`pip install .` した場合、このバリアントは `nlm-tui-curses` コマンドとしても利用できます。
+Windows / Python 3.14 では、まず `nlm-tui` / `nlm-tui-en` を使ってください。
 
 Flashcards / Quiz は次の 3 ファイルで保存されます。
 

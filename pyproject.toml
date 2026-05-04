@@ -27,7 +27,8 @@ nlm-upload = "nlm_upload:main"
 nlm-login = "nlm_login:main"
 nlm-tui = "nlm_tui:main"
 nlm-tui-en = "nlm_tui_en:main"
+nlm-tui-curses = "nlm_tui_curses:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["."]
-include = ["nlm_backup.py", "nlm_upload.py", "nlm_login.py", "nlm_tui.py", "nlm_tui_en.py", "notebooklm_client.py"]
+include = ["nlm_backup.py", "nlm_upload.py", "nlm_login.py", "nlm_tui.py", "nlm_tui_en.py", "nlm_tui_curses.py", "notebooklm_client.py"]

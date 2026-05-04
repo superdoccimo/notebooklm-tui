@@ -26,7 +26,7 @@ A zero-dependency Python toolkit that backs up and restores your entire Notebook
 - `nlm-upload`: Upload files/URLs and restore from backup folders
 - `nlm-tui`: Japanese UI terminal TUI
 - `nlm-tui-en`: English UI terminal TUI
-- `nlm-tui-curses` (script: `nlm_tui_curses.py`): Optional curses-based flicker-reduced TUI (experimental)
+- `nlm-tui-curses`: Optional curses-based flicker-reduced TUI (experimental; may require extra setup on Windows)
 
 Core CLI tools and standard TUIs run on Python standard library only (no third-party packages required).
 On Windows/Python 3.14, prefer `nlm_tui.py` or `nlm_tui_en.py`. `nlm_tui_curses.py` may require extra setup on Windows (see below).
@@ -127,7 +127,7 @@ Optional install as commands:
 
 ```bash
 pip install .
-# provides: nlm-backup, nlm-upload, nlm-login, nlm-tui, nlm-tui-en
+# provides: nlm-backup, nlm-upload, nlm-login, nlm-tui, nlm-tui-en, nlm-tui-curses
 ```
 
 ## Usage: `nlm-backup` (Download)
@@ -220,8 +220,8 @@ python nlm_tui_curses.py --cookies /path/to/cookies.json
 python nlm_tui_curses.py --log ./nlm_tui_curses.log
 ```
 
-`nlm_tui_curses.py` is currently script-only and is not installed as a `nlm-tui-curses` command via `pip install .`.
-Use `python nlm_tui.py` / `python nlm_tui_en.py` as the default choice on Windows/Python 3.14.
+When installed with `pip install .`, this variant is also available as `nlm-tui-curses`.
+Use `nlm-tui` / `nlm-tui-en` as the default choice on Windows/Python 3.14.
 
 Flashcards and Quiz artifacts are exported in three files:
 
