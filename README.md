@@ -258,14 +258,15 @@ If `nlm_tui_curses.py` cannot run in your environment, or you are on Python 3.14
 
 ### Supported File Types
 
+These are the file extensions accepted by `nlm-upload`. NotebookLM's officially documented source support currently includes PDF, DOCX, TXT, Markdown, CSV, PPTX, EPUB, images, audio/transcription files, web URLs, YouTube URLs, and Google Drive files. Best-effort entries may fail if NotebookLM rejects them.
+
 | Category | Extensions |
 |---|---|
-| Document | `.pdf` `.txt` `.md` `.doc` `.docx` `.ppt` `.pptx` `.xls` `.xlsx` |
-| Data | `.csv` `.tsv` `.json` `.xml` |
-| Web | `.html` `.htm` |
-| Audio | `.mp3` `.wav` `.m4a` `.ogg` `.flac` |
-| Video | `.mp4` `.mov` `.avi` `.mkv` `.webm` |
-| Image | `.png` `.jpg` `.jpeg` `.gif` `.bmp` `.webp` |
+| Documents | `.pdf` `.docx` `.pptx` `.epub` |
+| Text / data pasted as text sources | `.txt` `.md` `.csv` `.tsv` `.json` `.xml` `.html` `.htm` |
+| Audio / transcription containers | `.3g2` `.3gp` `.aac` `.aif` `.aifc` `.aiff` `.amr` `.au` `.avi` `.cda` `.m4a` `.mid` `.mp3` `.mp4` `.mpeg` `.ogg` `.opus` `.ra` `.ram` `.snd` `.wav` `.wma` |
+| Images | `.avif` `.bmp` `.gif` `.heic` `.heif` `.ico` `.jp2` `.jpe` `.jpeg` `.jpg` `.png` `.tif` `.tiff` `.webp` |
+| Best-effort legacy/media uploads | `.doc` `.ppt` `.xls` `.xlsx` `.flac` `.mov` `.mkv` `.webm` |
 
 ## Output Structure
 
@@ -312,7 +313,7 @@ downloads/
 |---|---|
 | Audio Overview | `.m4a` |
 | Video Overview | `.mp4` |
-| Slide Deck | `.pdf` |
+| Slide Deck | `.pdf` + `.pptx` when available |
 | Report | `.md` |
 | Data Table | `.csv` |
 | Flashcards | `.md` + `.html` + `.json` |

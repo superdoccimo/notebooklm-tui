@@ -261,14 +261,15 @@ Windows での注意点:
 
 ### 対応ファイル形式
 
+以下は `nlm-upload` が受け付ける拡張子です。NotebookLM の公開ヘルプ上で確認できる公式 source 対応は、PDF、DOCX、TXT、Markdown、CSV、PPTX、EPUB、画像、音声/文字起こしファイル、Web URL、YouTube URL、Google Drive ファイルです。best-effort の項目は NotebookLM 側で拒否される場合があります。
+
 | カテゴリ | 拡張子 |
 |---------|--------|
-| ドキュメント | `.pdf` `.txt` `.md` `.doc` `.docx` `.ppt` `.pptx` `.xls` `.xlsx` |
-| データ | `.csv` `.tsv` `.json` `.xml` |
-| ウェブ | `.html` `.htm` |
-| 音声 | `.mp3` `.wav` `.m4a` `.ogg` `.flac` |
-| 動画 | `.mp4` `.mov` `.avi` `.mkv` `.webm` |
-| 画像 | `.png` `.jpg` `.jpeg` `.gif` `.bmp` `.webp` |
+| ドキュメント | `.pdf` `.docx` `.pptx` `.epub` |
+| テキスト/データ（貼り付けソース） | `.txt` `.md` `.csv` `.tsv` `.json` `.xml` `.html` `.htm` |
+| 音声/文字起こしコンテナ | `.3g2` `.3gp` `.aac` `.aif` `.aifc` `.aiff` `.amr` `.au` `.avi` `.cda` `.m4a` `.mid` `.mp3` `.mp4` `.mpeg` `.ogg` `.opus` `.ra` `.ram` `.snd` `.wav` `.wma` |
+| 画像 | `.avif` `.bmp` `.gif` `.heic` `.heif` `.ico` `.jp2` `.jpe` `.jpeg` `.jpg` `.png` `.tif` `.tiff` `.webp` |
+| 互換目的の best-effort | `.doc` `.ppt` `.xls` `.xlsx` `.flac` `.mov` `.mkv` `.webm` |
 
 ## Output Structure
 
@@ -313,7 +314,7 @@ downloads/
 |------|--------|
 | Audio Overview | `.m4a` |
 | Video Overview | `.mp4` |
-| Slide Deck | `.pdf` |
+| Slide Deck | `.pdf` + 利用可能な場合は `.pptx` |
 | Report | `.md` |
 | Data Table | `.csv` |
 | Flashcards | `.md` + `.html` + `.json` |

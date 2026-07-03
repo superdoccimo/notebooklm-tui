@@ -24,14 +24,27 @@ from notebooklm_client import NotebookLMClient, NotebookLMError, AuthenticationE
 # テキストとして読み込んで add_source_text で追加する拡張子
 TEXT_EXTENSIONS = {".txt", ".md", ".csv", ".tsv", ".json", ".xml", ".html", ".htm"}
 
-# ファイルアップロード（resumable upload）が対応する拡張子
-UPLOAD_FILE_TYPES = {
-    ".pdf",
-    ".doc", ".docx", ".ppt", ".pptx", ".xls", ".xlsx",
-    ".mp3", ".wav", ".m4a", ".ogg", ".flac",
-    ".mp4", ".mov", ".avi", ".mkv", ".webm",
-    ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp",
+# ファイルアップロード（resumable upload）に渡す拡張子。
+# Google の公開ヘルプにある形式に加え、過去に使われていた形式は best-effort として残す。
+DOCUMENT_UPLOAD_EXTENSIONS = {".pdf", ".docx", ".pptx", ".epub"}
+IMAGE_UPLOAD_EXTENSIONS = {
+    ".avif", ".bmp", ".gif", ".heic", ".heif", ".ico", ".jp2", ".jpe",
+    ".jpeg", ".jpg", ".png", ".tif", ".tiff", ".webp",
 }
+AUDIO_UPLOAD_EXTENSIONS = {
+    ".3g2", ".3gp", ".aac", ".aif", ".aifc", ".aiff", ".amr", ".au",
+    ".avi", ".cda", ".m4a", ".mid", ".mp3", ".mp4", ".mpeg", ".ogg",
+    ".opus", ".ra", ".ram", ".snd", ".wav", ".wma",
+}
+BEST_EFFORT_UPLOAD_EXTENSIONS = {
+    ".doc", ".ppt", ".xls", ".xlsx", ".flac", ".mov", ".mkv", ".webm",
+}
+UPLOAD_FILE_TYPES = (
+    DOCUMENT_UPLOAD_EXTENSIONS
+    | IMAGE_UPLOAD_EXTENSIONS
+    | AUDIO_UPLOAD_EXTENSIONS
+    | BEST_EFFORT_UPLOAD_EXTENSIONS
+)
 
 
 def collect_files(paths: list[str]) -> list[Path]:
@@ -150,12 +163,11 @@ def print_supported_types():
     """対応ファイル形式を表示"""
     print("\n対応ファイル形式:")
     categories = {
-        "ドキュメント": [".pdf", ".txt", ".md", ".doc", ".docx", ".ppt", ".pptx", ".xls", ".xlsx"],
-        "データ": [".csv", ".tsv", ".json", ".xml"],
-        "ウェブ": [".html", ".htm"],
-        "音声": [".mp3", ".wav", ".m4a", ".ogg", ".flac"],
-        "動画": [".mp4", ".mov", ".avi", ".mkv", ".webm"],
-        "画像": [".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp"],
+        "ドキュメント": sorted(DOCUMENT_UPLOAD_EXTENSIONS),
+        "テキスト/データ (貼り付けソース)": sorted(TEXT_EXTENSIONS),
+        "音声/文字起こし": sorted(AUDIO_UPLOAD_EXTENSIONS),
+        "画像": sorted(IMAGE_UPLOAD_EXTENSIONS),
+        "互換目的のベストエフォート": sorted(BEST_EFFORT_UPLOAD_EXTENSIONS),
     }
     for cat, exts in categories.items():
         print(f"  {cat}: {', '.join(exts)}")
