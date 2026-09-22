@@ -220,6 +220,15 @@ nlm-upload --types
 
 Backup schema v2 stores restore-safe sidecars under `sources/_metadata/`, `notes/_metadata/`, and `mindmaps/_metadata/`. Signed/capability download URLs are deliberately **not** persisted in those sidecars.
 
+Before creating a notebook, you can inspect the exact restore plan locally:
+
+```bash
+# No Google authentication, no Notebook creation, no network writes
+nlm-upload --restore ./downloads/My_Notebook/ --dry-run
+```
+
+This writes `restore-plan.json` and shows which items would be `restored`, `degraded`, `preserved_only`, or fail preflight.
+
 `nlm-upload --restore` restores only representations it can identify without pretending that a different object is the original:
 
 | Backup item | Restore behavior |
