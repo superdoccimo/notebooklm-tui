@@ -6,14 +6,14 @@
 
 > If this tool saved your Gemini Notebook / NotebookLM data, please consider giving it a star.
 
-A zero-dependency Python toolkit that backs up and restores Gemini Notebook (formerly NotebookLM) workspaces from the command line.
+A zero-dependency Python toolkit that backs up Gemini Notebook (formerly NotebookLM) workspaces and semantically restores the parts that have faithful server-side write paths.
 
 - Back up sources, preferring original uploaded files when Gemini Notebook exposes a direct download; otherwise save extracted text/rendered content
 - Export artifacts (audio, video, slides + PPTX, reports, infographics, data tables, mindmaps)
 - Save flashcards and quizzes with schema-tolerant parsing for newer quiz formats
 - Preserve a raw JSON snapshot of every Studio artifact for forward compatibility
 - Backup notes
-- Restore notebooks from local backups
+- Restore URLs/original files, native Notes, and note-backed mind maps without silently turning fallback files into different source types
 - No external Python packages required
 
 > **September 2026 compatibility:** The client now uses the current `notebook.google.com` host and migrated request wrappers for notebook create/read, URL/text source add, and file registration. Quiz export tolerates newer short-answer / multiple-select / fill-in-the-blank schema shapes, interactive mind-map artifacts export as Markdown + JSON, all CLI/TUI variants share the same artifact exporter, and every Studio artifact also gets a raw snapshot under `artifacts/_raw/`. Interactive Learning Overview payloads are preserved as HTML/structured data when exposed by the current artifact row; formats not yet observed live are not claimed as losslessly reconstructed.
@@ -26,7 +26,7 @@ A zero-dependency Python toolkit that backs up and restores Gemini Notebook (for
 
 - `nlm-login`: Get NotebookLM auth cookies from your browser (Edge/Chrome/Brave/Firefox)
 - `nlm-backup`: Download sources, artifacts, and notes
-- `nlm-upload`: Upload files/URLs and restore from backup folders
+- `nlm-upload`: Upload files/URLs and perform semantics-aware restore from backup folders
 - `nlm-tui`: Japanese UI terminal TUI
 - `nlm-tui-en`: English UI terminal TUI
 - `nlm-tui-curses`: Optional curses-based flicker-reduced TUI (experimental; may require extra setup on Windows)
@@ -58,8 +58,11 @@ Upload examples:
 # Upload files to a new notebook
 python nlm_upload.py "My Research" paper.pdf notes.md
 
-# Restore from a previous backup folder
+# Semantics-aware restore from a previous backup folder
 python nlm_upload.py --restore ./downloads/My_Notebook/
+
+# Optional: how long each restored source may take to become ready
+python nlm_upload.py --restore ./downloads/My_Notebook/ --wait-timeout 300
 ```
 
 TUI example:
@@ -213,6 +216,28 @@ nlm-upload --types
 
 > If you did not run `pip install .`, use `python nlm_upload.py` instead.
 
+## Restore Semantics
+
+Backup schema v2 stores restore-safe sidecars under `sources/_metadata/`, `notes/_metadata/`, and `mindmaps/_metadata/`. Signed/capability download URLs are deliberately **not** persisted in those sidecars.
+
+`nlm-upload --restore` restores only representations it can identify without pretending that a different object is the original:
+
+| Backup item | Restore behavior |
+|---|---|
+| Web / YouTube source with canonical URL | re-add the URL |
+| Source with an original downloaded file | upload that original file |
+| Pasted text / Markdown fallback | restore as a text source |
+| Native Note | recreate as a native Gemini Notebook Note |
+| Note-backed mind map JSON | recreate as a native JSON-backed Note/mind map |
+| Image with only a rendered fallback | restore the rendered image and report it as degraded |
+| PDF with only rendered page images | keep the page images local; **do not** upload each page as a separate image source |
+| Extracted content whose original source representation is unavailable | optionally restore preserved text, but mark it `DEGRADED` |
+| Studio artifacts (Audio/Video/Report/Quiz/etc.) | keep the exact downloaded/local evidence; **do not regenerate**, because regeneration would create new AI output rather than restore the original |
+
+Every restore writes `restore-report-<new-notebook-id>.json` with `restored`, `degraded`, `preserved_only`, and `failed` outcomes. The terminal prints `COMPLETE WITH LIMITATIONS` whenever preserved/degraded data remains.
+
+Legacy backups without sidecars are handled conservatively. The restore path reads only top-level files in `sources/`; it never recursively uploads old PDF page-image directories.
+
 ## Usage: `nlm-tui` / `nlm-tui-en` (Terminal UI)
 
 ```bash
@@ -310,6 +335,7 @@ downloads/
 └── <Notebook Title>/
     ├── metadata.json          # notebook metadata (id/title/updated time)
     ├── sources/               # user uploaded sources
+    │   ├── _metadata/          # restore-safe source type/URL/file mapping
     │   ├── document.md        # extracted text / web content
     │   ├── research.docx      # original uploaded file when direct download is available
     │   ├── recording.m4a      # original media when available
@@ -330,8 +356,13 @@ downloads/
     │   ├── quiz.html
     │   ├── quiz.json
     │   └── ...
-    └── notes/                 # user-authored notes
-        └── my_note.md
+    ├── notes/                 # user-authored notes
+    │   ├── _metadata/          # native Note restore mapping
+    │   └── my_note.md
+    └── mindmaps/
+        ├── _metadata/          # note-backed mind-map restore mapping
+        ├── my_map.json
+        └── my_map.md
 ```
 
 ## What Gets Downloaded
