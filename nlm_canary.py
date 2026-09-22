@@ -153,6 +153,8 @@ def run_read_only_canary(
     sources = client.list_sources(notebook_id)
     source_results: list[dict] = []
     for source in sources:
+        source = dict(source)
+        source["notebook_id"] = notebook_id
         try:
             result = save_source(client, source, output_dir)
             source_results.append(
@@ -319,6 +321,8 @@ def run_write_smoke(
 
         saved_rows = []
         for source in sources:
+            source = dict(source)
+            source["notebook_id"] = notebook_id
             try:
                 result = save_source(client, source, output_dir)
                 saved_rows.append(
