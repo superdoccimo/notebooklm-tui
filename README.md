@@ -327,15 +327,17 @@ If `nlm_tui_curses.py` cannot run in your environment, or you are on Python 3.14
 
 ### Supported File Types
 
-These are the file extensions accepted by `nlm-upload`. NotebookLM's officially documented source support currently includes PDF, DOCX, TXT, Markdown, CSV, PPTX, EPUB, images, audio/transcription files, web URLs, YouTube URLs, and Google Drive files. Best-effort entries may fail if NotebookLM rejects them.
+These are the file extensions accepted by `nlm-upload`. The CLI now keeps documented native file formats as files instead of silently converting `.txt`, `.md`, or `.csv` into pasted-text sources.
 
-| Category | Extensions |
+| Category | Extensions / behavior |
 |---|---|
-| Documents | `.pdf` `.docx` `.pptx` `.epub` |
-| Text / data pasted as text sources | `.txt` `.md` `.csv` `.tsv` `.json` `.xml` `.html` `.htm` |
+| Native document / text / data files | `.pdf` `.docx` `.pptx` `.epub` `.txt` `.md` `.markdown` `.csv` |
 | Audio / transcription containers | `.3g2` `.3gp` `.aac` `.aif` `.aifc` `.aiff` `.amr` `.au` `.avi` `.cda` `.m4a` `.mid` `.mp3` `.mp4` `.mpeg` `.ogg` `.opus` `.ra` `.ram` `.snd` `.wav` `.wma` |
 | Images | `.avif` `.bmp` `.gif` `.heic` `.heif` `.ico` `.jp2` `.jpe` `.jpeg` `.jpg` `.png` `.tif` `.tiff` `.webp` |
-| Best-effort legacy/media uploads | `.doc` `.ppt` `.xls` `.xlsx` `.flac` `.mov` `.mkv` `.webm` |
+| Explicit pasted-text fallback | `.tsv` `.json` `.xml` `.html` `.htm` |
+| Rejected by default; convert first | `.doc` `.ppt` `.xls` `.xlsx` `.flac` `.mov` `.mkv` `.webm` |
+
+Files larger than 200 MiB and empty files are rejected locally before any upload RPC is sent.
 
 ## Output Structure
 
