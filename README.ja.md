@@ -338,7 +338,7 @@ downloads/
 
 ## Architecture
 
-このツールは Gemini Notebook / NotebookLM の内部 `batchexecute` API を直接操作します。既定hostは `https://notebook.google.com` です。必要な場合は `NOTEBOOKLM_BASE_URL=https://notebooklm.google.com` で旧hostへ切り替えられます。
+このツールは Gemini Notebook / NotebookLM の内部 `batchexecute` API を直接操作します。RPC/認証の既定hostは `https://notebook.google.com` で、`NOTEBOOKLM_BASE_URL` で切り替えられます。一方、ファイルuploadのsession開始は実運用で確認されている `https://notebooklm.google.com` を既定に残し、rebrand側のupload endpointが使えるaccount cohortでは `NOTEBOOKLM_UPLOAD_BASE_URL=https://notebook.google.com` で切り替えられます。
 
 ```
 nlm_login.py            ← 認証ツール（Chromium系: CDP / Firefox: cookies.sqlite）
