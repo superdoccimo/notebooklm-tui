@@ -40,6 +40,10 @@ AUDIO_UPLOAD_EXTENSIONS = {
 # これらはファイルuploadせず、明示的な貼り付けテキストsourceとして追加する。
 PASTED_TEXT_EXTENSIONS = {".tsv", ".json", ".xml", ".html", ".htm"}
 
+# sidecarのない旧backupでは、.txt/.md/.csvが原本だったか抽出テキストだったか
+# 判別できない。従来どおりtext sourceとして戻し、DEGRADED扱いにする。
+LEGACY_TEXT_RESTORE_EXTENSIONS = PASTED_TEXT_EXTENSIONS | {".txt", ".md", ".csv"}
+
 # 過去にbest-effortとして通していたが、現在の公開サポート範囲に含めない。
 # サーバーへ投げて曖昧な失敗にせず、CLIで明確に拒否する。
 UNVERIFIED_UPLOAD_EXTENSIONS = {
@@ -299,7 +303,7 @@ def _restore_legacy_sources(
         print(f"  [legacy] {path.name} ... ", end="", flush=True)
         try:
             ext = path.suffix.lower()
-            if ext in PASTED_TEXT_EXTENSIONS:
+            if ext in LEGACY_TEXT_RESTORE_EXTENSIONS:
                 content = path.read_text(encoding="utf-8")
                 source_id = client.add_source_text(notebook_id, path.name, content)
                 restored_as = "text"
