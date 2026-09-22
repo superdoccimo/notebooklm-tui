@@ -329,15 +329,17 @@ Windows での注意点:
 
 ### 対応ファイル形式
 
-以下は `nlm-upload` が受け付ける拡張子です。NotebookLM の公開ヘルプ上で確認できる公式 source 対応は、PDF、DOCX、TXT、Markdown、CSV、PPTX、EPUB、画像、音声/文字起こしファイル、Web URL、YouTube URL、Google Drive ファイルです。best-effort の項目は NotebookLM 側で拒否される場合があります。
+以下は `nlm-upload` の入力ポリシーです。`.txt` / `.md` / `.csv` は pasted text へ変換せず、Gemini Notebook のネイティブファイルsourceとして送ります。
 
-| カテゴリ | 拡張子 |
+| カテゴリ | 拡張子 / 動作 |
 |---------|--------|
-| ドキュメント | `.pdf` `.docx` `.pptx` `.epub` |
-| テキスト/データ（貼り付けソース） | `.txt` `.md` `.csv` `.tsv` `.json` `.xml` `.html` `.htm` |
+| ネイティブ文書・テキスト・データ | `.pdf` `.docx` `.pptx` `.epub` `.txt` `.md` `.markdown` `.csv` |
 | 音声/文字起こしコンテナ | `.3g2` `.3gp` `.aac` `.aif` `.aifc` `.aiff` `.amr` `.au` `.avi` `.cda` `.m4a` `.mid` `.mp3` `.mp4` `.mpeg` `.ogg` `.opus` `.ra` `.ram` `.snd` `.wav` `.wma` |
 | 画像 | `.avif` `.bmp` `.gif` `.heic` `.heif` `.ico` `.jp2` `.jpe` `.jpeg` `.jpg` `.png` `.tif` `.tiff` `.webp` |
-| 互換目的の best-effort | `.doc` `.ppt` `.xls` `.xlsx` `.flac` `.mov` `.mkv` `.webm` |
+| 明示的に貼り付けテキストへ変換 | `.tsv` `.json` `.xml` `.html` `.htm` |
+| 標準では拒否。変換してから再試行 | `.doc` `.ppt` `.xls` `.xlsx` `.flac` `.mov` `.mkv` `.webm` |
+
+空ファイルと200 MiBを超えるファイルは、upload RPCを送る前にローカルで拒否します。
 
 ## Output Structure
 

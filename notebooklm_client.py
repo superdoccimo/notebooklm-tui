@@ -45,6 +45,7 @@ DEFAULT_BUILD_LABEL = "boq_labs-tailwind-frontend_20260108.06_p0"
 BUILD_LABEL_PATTERN = re.compile(r"\bboq_[A-Za-z0-9_-]+_[0-9]{8}\.[0-9]+_p[0-9]+\b")
 
 DEFAULT_COOKIES_PATH = Path.home() / ".notebooklm-mcp-cli" / "profiles" / "default" / "cookies.json"
+MAX_UPLOAD_BYTES = 200 * 1024 * 1024
 
 USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -724,6 +725,13 @@ class NotebookLMClient:
 
         filename = file_path.name
         file_size = file_path.stat().st_size
+        if file_size <= 0:
+            raise NotebookLMError(f"空ファイルはアップロードできません: {filename}")
+        if file_size > MAX_UPLOAD_BYTES:
+            raise NotebookLMError(
+                f"ファイルが200 MiB上限を超えています: {filename} "
+                f"({file_size} bytes)"
+            )
         content_type = mimetypes.guess_type(filename)[0] or "application/octet-stream"
 
         # Step 1: ファイルソースを登録 → source_id 取得

@@ -11,10 +11,17 @@ from nlm_backup import (
     save_artifact_raw_snapshot,
     save_source,
 )
-from nlm_upload import collect_files
+from nlm_upload import (
+    DOCUMENT_UPLOAD_EXTENSIONS,
+    PASTED_TEXT_EXTENSIONS,
+    UNVERIFIED_UPLOAD_EXTENSIONS,
+    collect_files,
+    upload_files,
+)
 from notebooklm_client import (
     ARTIFACT_STATUS,
     SOURCE_TYPES,
+    MAX_UPLOAD_BYTES,
     NotebookLMClient,
     _is_youtube_url,
     _template_block,
@@ -421,6 +428,97 @@ class SourceBackupTests(unittest.TestCase):
         self.assertTrue(result["saved"])
         self.assertEqual(result["mode"], "text")
         self.assertEqual(payload, "fallback text")
+
+
+class UploadRoutingTests(unittest.TestCase):
+    class FakeClient:
+        def __init__(self):
+            self.uploaded = []
+            self.pasted = []
+
+        def upload_file(self, notebook_id, path):
+            self.uploaded.append((notebook_id, Path(path).name))
+            return f"file-{len(self.uploaded)}"
+
+        def add_source_text(self, notebook_id, title, text):
+            self.pasted.append((notebook_id, title, text))
+            return f"text-{len(self.pasted)}"
+
+    def test_native_text_and_csv_formats_stay_native_files(self):
+        self.assertTrue({".txt", ".md", ".csv"} <= DOCUMENT_UPLOAD_EXTENSIONS)
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            files = []
+            for name in ("notes.txt", "readme.md", "data.csv"):
+                path = root / name
+                path.write_text("body", encoding="utf-8")
+                files.append(path)
+
+            client = self.FakeClient()
+            ok, fail = upload_files(client, "nb-1", files)
+
+        self.assertEqual((ok, fail), (3, 0))
+        self.assertEqual(
+            [name for _nb, name in client.uploaded],
+            ["notes.txt", "readme.md", "data.csv"],
+        )
+        self.assertEqual(client.pasted, [])
+
+    def test_html_json_tsv_are_explicit_pasted_text_fallbacks(self):
+        self.assertTrue({".html", ".json", ".tsv"} <= PASTED_TEXT_EXTENSIONS)
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            files = []
+            for name in ("page.html", "data.json", "table.tsv"):
+                path = root / name
+                path.write_text("payload", encoding="utf-8")
+                files.append(path)
+
+            client = self.FakeClient()
+            ok, fail = upload_files(client, "nb-1", files)
+
+        self.assertEqual((ok, fail), (3, 0))
+        self.assertEqual(client.uploaded, [])
+        self.assertEqual(
+            [title for _nb, title, _text in client.pasted],
+            ["page.html", "data.json", "table.tsv"],
+        )
+
+    def test_unverified_legacy_formats_are_not_sent_to_server(self):
+        self.assertIn(".xlsx", UNVERIFIED_UPLOAD_EXTENSIONS)
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "book.xlsx"
+            path.write_bytes(b"xlsx")
+            client = self.FakeClient()
+            ok, fail = upload_files(client, "nb-1", [path])
+
+        self.assertEqual((ok, fail), (0, 1))
+        self.assertEqual(client.uploaded, [])
+        self.assertEqual(client.pasted, [])
+
+    def test_upload_file_rejects_empty_file_before_network(self):
+        client = NotebookLMClient.__new__(NotebookLMClient)
+        client._batchexecute = lambda *args, **kwargs: self.fail("network/RPC should not run")
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "empty.pdf"
+            path.write_bytes(b"")
+            with self.assertRaises(NotebookLMError):
+                client.upload_file("nb-1", path)
+
+    def test_upload_file_rejects_over_200_mib_before_network(self):
+        client = NotebookLMClient.__new__(NotebookLMClient)
+        client._batchexecute = lambda *args, **kwargs: self.fail("network/RPC should not run")
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "too-large.pdf"
+            with path.open("wb") as handle:
+                handle.truncate(MAX_UPLOAD_BYTES + 1)
+            with self.assertRaises(NotebookLMError):
+                client.upload_file("nb-1", path)
 
 
 class UploadHelperTests(unittest.TestCase):
