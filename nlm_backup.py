@@ -15,6 +15,7 @@ Usage:
 
 import argparse
 import json
+import mimetypes
 import re
 import sys
 from datetime import datetime, timezone
@@ -30,7 +31,10 @@ ARTIFACT_EXTENSIONS = {
     "report": ".md",
     "data_table": ".csv",
     "flashcards": ".md",
+    "mind_map": ".json",
+    "fantasy_map": ".json",
     "infographic": ".png",
+    "file": ".bin",
 }
 
 
@@ -89,6 +93,72 @@ def save_image_source(client: NotebookLMClient, content: dict, out_dir: Path) ->
     return saved
 
 
+SOURCE_TEXT_TYPES = frozenset({
+    "pasted_text",
+    "web_page",
+    "markdown",
+    "youtube",
+    "media",
+    "powerpoint",
+    "google_spreadsheet",
+    "docx",
+    "excel",
+    "google_drive",
+    "gmail",
+    "csv",
+    "epub",
+    "gemini_chat",
+    "ai_mode_chat",
+    "expert_intelligence",
+    "google_docs",
+    "google_slides",
+    "unknown",
+})
+
+
+def _source_original_path(source: dict, out_dir: Path) -> Path:
+    title = sanitize_filename(source.get("title", "") or "")
+    stem = Path(title).stem if title else source.get("id", "source")
+    suffix = Path(title).suffix
+    if not suffix:
+        suffix = mimetypes.guess_extension(source.get("content_mime") or "") or {
+            "pdf": ".pdf",
+            "image": ".png",
+            "media": ".bin",
+        }.get(source.get("type"), ".bin")
+    return _unique_path(out_dir / "sources" / f"{stem}{suffix}")
+
+
+def save_source(client: NotebookLMClient, source: dict, out_dir: Path) -> dict:
+    """Save one source, preferring the original uploaded file when available."""
+    source_id = source.get("id")
+    if not source_id:
+        return {"saved": False, "mode": "missing-id", "paths": []}
+
+    original_url = source.get("download_url")
+    if isinstance(original_url, str) and original_url.startswith("http"):
+        dest = _source_original_path(source, out_dir)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        if client.download_url(original_url, dest):
+            return {"saved": True, "mode": "original", "paths": [dest]}
+        try:
+            dest.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+    content = client.get_source_content(source_id)
+    source_type = source.get("type", "unknown")
+    if source_type == "image":
+        paths = save_image_source(client, content, out_dir)
+        return {"saved": bool(paths), "mode": "rendered-image", "paths": paths}
+    if source_type == "pdf":
+        paths = save_pdf_source(client, content, out_dir)
+        return {"saved": bool(paths), "mode": "rendered-pages", "paths": paths}
+
+    path = save_text_source(client, content, out_dir)
+    return {"saved": True, "mode": "text", "paths": [path]}
+
+
 def save_pdf_source(client: NotebookLMClient, content: dict, out_dir: Path) -> list[Path]:
     title = sanitize_filename(content.get("title", "document"))
     stem = Path(title).stem
@@ -130,6 +200,65 @@ def save_artifact_raw_snapshot(artifact: dict, art_dir: Path, stem: str) -> Path
     return dest
 
 
+def _artifact_stem(artifact: dict) -> str:
+    raw_title = sanitize_filename(artifact.get("title", "") or "")
+    if raw_title:
+        return Path(raw_title).stem
+    return artifact.get("variant") or artifact.get("type", "artifact") or "artifact"
+
+
+def _artifact_extension(artifact: dict) -> str:
+    art_type = artifact.get("type", "unknown")
+    variant = artifact.get("variant")
+    if variant == "interactive_mind_map":
+        return ".md"
+    if (
+        artifact.get("structured_content") is not None
+        and not artifact.get("content")
+        and not artifact.get("app_html")
+        and artifact.get("type_code") != 4
+    ):
+        return ".json"
+    return ARTIFACT_EXTENSIONS.get(art_type, ".bin")
+
+
+def save_artifact(client: NotebookLMClient, artifact: dict, out_dir: Path) -> dict:
+    """単一Studio artifactをCLI/TUI共通ルールで保存する"""
+    art_dir = out_dir / "artifacts"
+    art_dir.mkdir(parents=True, exist_ok=True)
+
+    stem = _artifact_stem(artifact)
+    raw_snapshot = save_artifact_raw_snapshot(artifact, art_dir, stem)
+    result = {
+        "saved": False,
+        "status": artifact.get("status", ""),
+        "raw_snapshot": raw_snapshot,
+        "dest": None,
+        "pptx_saved": None,
+        "pptx_dest": None,
+        "pages_count": None,
+    }
+
+    if artifact.get("status") != "completed":
+        return result
+
+    ext = _artifact_extension(artifact)
+    dest = _unique_path(art_dir / f"{stem}{ext}")
+    result["dest"] = dest
+    result["saved"] = client.download_artifact(artifact, dest)
+
+    if artifact.get("pptx_url"):
+        pptx_dest = _unique_path(dest.with_suffix(".pptx"))
+        result["pptx_dest"] = pptx_dest
+        result["pptx_saved"] = client.download_artifact_pptx(artifact, pptx_dest)
+
+    if artifact.get("page_images"):
+        pages_dir = art_dir / dest.stem
+        result["pages_count"] = len(client.download_artifact_pages(artifact, pages_dir))
+
+    return result
+
+
 def save_artifacts(client: NotebookLMClient, artifacts: list[dict], out_dir: Path) -> int:
     """アーティファクトをダウンロード"""
     art_dir = out_dir / "artifacts"
@@ -138,60 +267,35 @@ def save_artifacts(client: NotebookLMClient, artifacts: list[dict], out_dir: Pat
 
     for art in artifacts:
         art_type = art.get("type", "unknown")
-        status = art.get("status", "")
+        result = save_artifact(client, art, out_dir)
+        raw_snapshot = result["raw_snapshot"]
 
-        raw_title = sanitize_filename(art.get("title", "") or "")
-        stem = Path(raw_title).stem if raw_title else art_type
-        if not stem:
-            stem = art_type
-
-        # Google が Studio schema を変更しても、生 payload は必ず残す。
-        # これにより後から parser を更新して再解析できる。
-        raw_snapshot = save_artifact_raw_snapshot(art, art_dir, stem)
-
-        if status != "completed":
+        if result["status"] != "completed":
             print(
-                f"    [{art_type}] (status: {status}, skipped; "
+                f"    [{art_type}] (status: {result['status']}, skipped; "
                 f"raw: {raw_snapshot.relative_to(art_dir)})"
             )
             continue
 
-        ext = ARTIFACT_EXTENSIONS.get(art_type, ".bin")
-        if art.get("structured_content") is not None and not art.get("content") and not art.get("app_html"):
-            ext = ".json"
-        dest = art_dir / f"{stem}{ext}"
-
-        # 同名ファイルがある場合はナンバリング
-        if dest.exists():
-            i = 2
-            while dest.exists():
-                dest = art_dir / f"{stem}_{i}{ext}"
-                i += 1
-
+        dest = result["dest"]
         print(f"    [{art_type}] → {dest.name} ... ", end="", flush=True)
-
-        if client.download_artifact(art, dest):
+        if result["saved"]:
             print("OK")
             count += 1
         else:
             print(f"FAIL (raw preserved: {raw_snapshot.relative_to(art_dir)})")
 
-        # スライドデッキの PPTX をダウンロード
-        if art.get("pptx_url"):
-            pptx_dest = dest.with_suffix(".pptx")
-            print(f"    [{art_type}] → {pptx_dest.name} ... ", end="", flush=True)
-            if client.download_artifact_pptx(art, pptx_dest):
-                print("OK")
-            else:
-                print("FAIL")
+        if result["pptx_saved"] is not None:
+            print(
+                f"    [{art_type}] → {result['pptx_dest'].name} ... "
+                f"{'OK' if result['pptx_saved'] else 'FAIL'}"
+            )
 
-        # スライドデッキのページ画像をダウンロード
-        if art.get("page_images"):
-            stem = dest.stem
-            pages_dir = art_dir / stem
-            print(f"    [{art_type}] → {stem}/ (pages) ... ", end="", flush=True)
-            pages = client.download_artifact_pages(art, pages_dir)
-            print(f"OK ({len(pages)} pages)")
+        if result["pages_count"] is not None:
+            print(
+                f"    [{art_type}] → {dest.stem}/ (pages) ... "
+                f"OK ({result['pages_count']} pages)"
+            )
 
     return count
 
@@ -332,27 +436,19 @@ def download_notebook(client: NotebookLMClient, notebook_id: str, out_base: Path
         print(f"    [{src_type}] {src_title} ... ", end="", flush=True)
 
         try:
-            content = client.get_source_content(src_id)
-        except NotebookLMError as e:
+            result = save_source(client, src, out_dir)
+        except (NotebookLMError, OSError) as e:
             print(f"FAIL ({e})")
             continue
 
-        if src_type in ("text", "generated_text", "website", "document"):
-            save_text_source(client, content, out_dir)
-            print("OK")
-            src_ok += 1
-        elif src_type == "image":
-            paths = save_image_source(client, content, out_dir)
-            print(f"OK ({len(paths)} file)")
-            src_ok += 1
-        elif src_type == "pdf":
-            paths = save_pdf_source(client, content, out_dir)
-            print(f"OK ({len(paths)} pages)")
+        if result["saved"]:
+            detail = result["mode"]
+            if result["paths"]:
+                detail += f", {len(result['paths'])} file(s)"
+            print(f"OK ({detail})")
             src_ok += 1
         else:
-            save_text_source(client, content, out_dir)
-            print("OK (as text)")
-            src_ok += 1
+            print(f"FAIL ({result['mode']})")
 
     # --- アーティファクト ---
     artifacts = client.list_artifacts(notebook_id)

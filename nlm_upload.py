@@ -19,7 +19,7 @@ import json
 import sys
 from pathlib import Path
 
-from notebooklm_client import NotebookLMClient, NotebookLMError, AuthenticationError
+from notebooklm_client import BASE_URL, NotebookLMClient, NotebookLMError, AuthenticationError
 
 # テキストとして読み込んで add_source_text で追加する拡張子
 TEXT_EXTENSIONS = {".txt", ".md", ".csv", ".tsv", ".json", ".xml", ".html", ".htm"}
@@ -155,7 +155,7 @@ def restore_backup(client: NotebookLMClient, backup_dir: Path) -> bool:
                     print(f"FAIL ({e})")
 
     print(f"\n  復元完了! → Notebook ID: {notebook_id}")
-    print(f"  https://notebooklm.google.com/notebook/{notebook_id}")
+    print(f"  {BASE_URL}/notebook/{notebook_id}")
     return True
 
 
@@ -258,7 +258,7 @@ def main():
         return
 
     print(f"\n  完了! → Notebook ID: {notebook_id}")
-    print(f"  https://notebooklm.google.com/notebook/{notebook_id}")
+    print(f"  {BASE_URL}/notebook/{notebook_id}")
 
 
 if __name__ == "__main__":

@@ -37,7 +37,7 @@ except (ImportError, ModuleNotFoundError) as exc:
     _CURSES_IMPORT_ERROR = exc
 
 from notebooklm_client import AuthenticationError, NotebookLMClient, NotebookLMError
-from nlm_backup import ARTIFACT_EXTENSIONS, format_timestamp, sanitize_filename, mindmap_to_markdown
+from nlm_backup import ARTIFACT_EXTENSIONS, format_timestamp, sanitize_filename, mindmap_to_markdown, save_artifact, save_source
 from nlm_upload import TEXT_EXTENSIONS, UPLOAD_FILE_TYPES, collect_files
 
 
@@ -178,6 +178,7 @@ def _artifact_variant(artifact: dict) -> str | None:
     return {
         1: "flashcards",
         2: "quiz",
+        4: "interactive_mind_map",
     }.get(subtype)
 
 
@@ -388,9 +389,16 @@ def _backup_notebook(
     else:
         sources = []
     if selection.artifacts:
-        artifacts = retry_plan.get("artifacts", []) if retry_plan is not None else [
-            a for a in client.list_artifacts(notebook_id) if a.get("status") == "completed"
-        ]
+        if retry_plan is not None:
+            artifacts = retry_plan.get("artifacts", [])
+        else:
+            listed_artifacts = client.list_artifacts(notebook_id)
+            for pending_artifact in listed_artifacts:
+                if pending_artifact.get("status") != "completed":
+                    save_artifact(client, pending_artifact, out_dir)
+            artifacts = [
+                a for a in listed_artifacts if a.get("status") == "completed"
+            ]
     else:
         artifacts = []
     if selection.notes:
@@ -428,48 +436,27 @@ def _backup_notebook(
             step(f"Sources {i}/{len(sources)}: {src_title}")
             continue
         try:
-            content = client.get_source_content(src_id)
-            if src_type in ("text", "generated_text", "website", "document"):
-                _save_text_source(content, out_dir)
-            elif src_type == "image":
-                _save_image_source(client, content, out_dir)
-            elif src_type == "pdf":
-                _save_pdf_source(client, content, out_dir)
+            result = save_source(client, src, out_dir)
+            if result["saved"]:
+                src_ok += 1
             else:
-                _save_text_source(content, out_dir)
-            src_ok += 1
+                src_fail += 1
+                failed_sources.append({"id": src_id, "type": src_type, "title": src_title})
         except (NotebookLMError, OSError):
             src_fail += 1
             failed_sources.append({"id": src_id, "type": src_type, "title": src_title})
         step(f"Sources {i}/{len(sources)}: {src_title}")
 
-    art_dir = out_dir / "artifacts"
-    art_dir.mkdir(parents=True, exist_ok=True)
     art_ok = 0
     art_fail = 0
     for i, art in enumerate(artifacts, 1):
-        art_type = art.get("type", "unknown")
         art_title = art.get("title", "untitled")
-        ext = ARTIFACT_EXTENSIONS.get(art_type, ".bin")
-        stem = _artifact_stem(art)
-        dest = _unique_path(art_dir / f"{stem}{ext}")
-
-        saved = client.download_artifact(art, dest)
-        if not saved and art.get("type_code") == 4:
-            saved = _save_type4_artifact(art, dest)
-
-        if saved:
+        result = save_artifact(client, art, out_dir)
+        if result["saved"]:
             art_ok += 1
         else:
             art_fail += 1
             failed_artifacts.append(art)
-        # Download PPTX for slide decks
-        if art.get("pptx_url"):
-            pptx_dest = dest.with_suffix(".pptx")
-            client.download_artifact_pptx(art, pptx_dest)
-        if art.get("page_images"):
-            pages_dir = art_dir / dest.stem
-            client.download_artifact_pages(art, pages_dir)
         step(f"Artifacts {i}/{len(artifacts)}: {art_title}")
 
     note_dir = out_dir / "notes"

@@ -11,6 +11,8 @@ Python 標準ライブラリのみで動作し、外部パッケージ依存は�
 import http.cookiejar
 import html as html_lib
 import json
+import mimetypes
+import os
 import re
 import ssl
 import urllib.parse
@@ -18,9 +20,26 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-BASE_URL = "https://notebooklm.google.com"
+DEFAULT_BASE_URL = "https://notebook.google.com"
+LEGACY_BASE_URL = "https://notebooklm.google.com"
+BASE_URL = os.environ.get("NOTEBOOKLM_BASE_URL", DEFAULT_BASE_URL).rstrip("/")
+if BASE_URL not in (DEFAULT_BASE_URL, LEGACY_BASE_URL):
+    raise ValueError(
+        "NOTEBOOKLM_BASE_URL must be https://notebook.google.com "
+        "or https://notebooklm.google.com"
+    )
 BATCHEXECUTE_URL = f"{BASE_URL}/_/LabsTailwindUi/data/batchexecute"
-UPLOAD_URL = f"{BASE_URL}/upload/_/?authuser=0"
+
+# Keep the web upload data plane independent from the rebranded RPC host.
+# The legacy consumer upload host is the live-observed path; callers can opt
+# into the new host explicitly once their account cohort supports it.
+UPLOAD_BASE_URL = os.environ.get("NOTEBOOKLM_UPLOAD_BASE_URL", LEGACY_BASE_URL).rstrip("/")
+if UPLOAD_BASE_URL not in (DEFAULT_BASE_URL, LEGACY_BASE_URL):
+    raise ValueError(
+        "NOTEBOOKLM_UPLOAD_BASE_URL must be https://notebook.google.com "
+        "or https://notebooklm.google.com"
+    )
+UPLOAD_URL = f"{UPLOAD_BASE_URL}/upload/_/?authuser=0"
 DEFAULT_BUILD_LABEL = "boq_labs-tailwind-frontend_20260108.06_p0"
 BUILD_LABEL_PATTERN = re.compile(r"\bboq_[A-Za-z0-9_-]+_[0-9]{8}\.[0-9]+_p[0-9]+\b")
 
@@ -32,20 +51,29 @@ USER_AGENT = (
     "Chrome/143.0.0.0 Safari/537.36"
 )
 
-# Source type codes from NotebookLM's internal enum
+# Source type codes from the current Gemini Notebook web contract.
+# Unknown future values intentionally remain "unknown" instead of being guessed.
 SOURCE_TYPES = {
-    0: "text",
-    1: "pdf",
-    2: "generated_text",
-    3: "pdf",           # uploaded PDF
-    4: "website",
-    5: "youtube",
-    6: "audio",
-    8: "document",      # uploaded text file (.md, .txt, etc.)
-    9: "image",
-    11: "google_doc",
-    12: "google_slides",
-    13: "image",         # uploaded image (.png, .jpg, etc.)
+    1: "google_docs",
+    2: "google_slides",
+    3: "pdf",
+    4: "pasted_text",
+    5: "web_page",
+    6: "powerpoint",
+    7: "google_spreadsheet",
+    8: "markdown",
+    9: "youtube",
+    10: "media",
+    11: "docx",
+    12: "excel",
+    13: "image",
+    14: "google_drive",
+    15: "gmail",
+    16: "csv",
+    17: "epub",
+    18: "gemini_chat",
+    19: "ai_mode_chat",
+    20: "expert_intelligence",
 }
 
 # Artifact type codes
@@ -53,22 +81,30 @@ ARTIFACT_TYPES = {
     1: "audio_overview",
     2: "report",
     3: "video_overview",
-    4: "flashcards",  # also quiz (distinguished by sub-format)
+    4: "flashcards",  # quiz / flashcards / interactive mind map use variants
+    5: "mind_map",
+    6: "fantasy_map",
     7: "infographic",
     8: "slide_deck",
     9: "data_table",
+    10: "file",
 }
 
 ARTIFACT_STATUS = {
-    1: "in_progress",
+    0: "unknown",
+    1: "pending",
+    2: "in_progress",
     3: "completed",
     4: "failed",
+    5: "suggested",
+    6: "pending_review",
 }
 
 APP_ARTIFACT_TYPES = {
     1: "flashcards",
     2: "quiz",
     3: "prototype",
+    4: "interactive_mind_map",
 }
 
 APP_ARTIFACT_DATA_PATTERN = re.compile(
@@ -83,6 +119,45 @@ class NotebookLMError(Exception):
 
 class AuthenticationError(NotebookLMError):
     pass
+
+
+def _template_block() -> list:
+    """Gemini Notebook current request-options wrapper."""
+    return [
+        2,
+        None,
+        None,
+        [1, None, None, None, None, None, None, None, None, None, [1]],
+    ]
+
+
+def _trusted_upload_origin(url: str) -> str:
+    """Validate a server-named resumable upload URL and return its HTTPS origin."""
+    parsed = urllib.parse.urlsplit(url)
+    if parsed.scheme != "https" or parsed.hostname not in {
+        "notebook.google.com",
+        "notebooklm.google.com",
+    }:
+        raise NotebookLMError("Unexpected resumable upload URL origin")
+    if parsed.username or parsed.password:
+        raise NotebookLMError("Unexpected credentials in resumable upload URL")
+    if not parsed.path.startswith("/upload/_/"):
+        raise NotebookLMError("Unexpected resumable upload URL path")
+    return f"https://{parsed.netloc}"
+
+
+def _is_youtube_url(url: str) -> bool:
+    try:
+        host = (urllib.parse.urlparse(url.strip()).hostname or "").lower()
+    except ValueError:
+        return False
+    return host in {
+        "youtube.com",
+        "www.youtube.com",
+        "m.youtube.com",
+        "music.youtube.com",
+        "youtu.be",
+    }
 
 
 class NotebookLMClient:
@@ -138,7 +213,7 @@ class NotebookLMClient:
             self._cookie_jar.set_cookie(cookie)
 
             # .googleusercontent.com 用（ダウンロードリダイレクト対応）
-            if domain in (".google.com", "notebooklm.google.com"):
+            if domain in (".google.com", "notebook.google.com", "notebooklm.google.com"):
                 gu_cookie = http.cookiejar.Cookie(
                     version=0, name=name, value=value,
                     port=None, port_specified=False,
@@ -341,10 +416,7 @@ class NotebookLMClient:
 
     def create_notebook(self, title: str) -> str:
         """ノートブックを作成してIDを返す"""
-        params = [
-            title, None, None, [2],
-            [1, None, None, None, None, None, None, None, None, None, [1]],
-        ]
+        params = [title, None, None, _template_block()]
         result = self._batchexecute("CCqFvf", params)
         if result and len(result) > 2:
             return result[2]
@@ -363,7 +435,7 @@ class NotebookLMClient:
         """ノートブック内のソース一覧を取得"""
         result = self._batchexecute(
             "rLM1Ne",
-            [notebook_id, None, [2], None, 0],
+            [notebook_id, None, _template_block(), None, 0],
             source_path=f"/notebook/{notebook_id}",
         )
         if not result or not isinstance(result[0], list) or len(result[0]) < 2:
@@ -386,10 +458,31 @@ class NotebookLMClient:
                     type_code = meta[4]
                 source_type = SOURCE_TYPES.get(type_code, "unknown")
 
-                # URL（もしあれば）
+                # URL（Web/YouTube source）
                 url = None
                 if meta and len(meta) > 7 and isinstance(meta[7], list) and meta[7]:
                     url = meta[7][0]
+                elif meta and len(meta) > 5 and isinstance(meta[5], list) and meta[5]:
+                    url = meta[5][0]
+
+                # Current source rows expose original uploaded-file download URL
+                # at index 5 and the true content MIME at [7][2].
+                download_url = None
+                if len(src) > 5 and isinstance(src[5], str) and src[5].startswith("http"):
+                    download_url = src[5]
+
+                viewer_url = None
+                if len(src) > 6 and isinstance(src[6], str) and src[6].startswith("http"):
+                    viewer_url = src[6]
+
+                content_mime = None
+                if (
+                    len(src) > 7
+                    and isinstance(src[7], list)
+                    and len(src[7]) > 2
+                    and isinstance(src[7][2], str)
+                ):
+                    content_mime = src[7][2]
 
                 sources.append({
                     "id": src_id,
@@ -397,6 +490,10 @@ class NotebookLMClient:
                     "type": source_type,
                     "type_code": type_code,
                     "url": url,
+                    "download_url": download_url,
+                    "viewer_url": viewer_url,
+                    "content_mime": content_mime,
+                    "_raw": src,
                 })
             except (IndexError, TypeError):
                 continue
@@ -449,12 +546,12 @@ class NotebookLMClient:
                 self._extract_text_recursive(item, parts)
 
     def add_source_url(self, notebook_id: str, url: str) -> str | None:
-        """URLソースを追加"""
-        source_data = [None, None, [url], None, None, None, None, None, None, None, 1]
-        params = [
-            [source_data], notebook_id, [2],
-            [1, None, None, None, None, None, None, None, None, None, [1]],
-        ]
+        """URL / YouTube ソースを追加"""
+        if _is_youtube_url(url):
+            source_data = [None, None, None, None, None, None, None, [url], None, None, 1]
+        else:
+            source_data = [None, None, [url], None, None, None, None, None, None, None, 1]
+        params = [[source_data], notebook_id, _template_block()]
         result = self._batchexecute("izAoDd", params, source_path=f"/notebook/{notebook_id}")
         try:
             return result[0][0][0][0]
@@ -464,10 +561,7 @@ class NotebookLMClient:
     def add_source_text(self, notebook_id: str, title: str, text: str) -> str | None:
         """テキストソースを追加"""
         source_data = [None, [title, text], None, 2, None, None, None, None, None, None, 1]
-        params = [
-            [source_data], notebook_id, [2],
-            [1, None, None, None, None, None, None, None, None, None, [1]],
-        ]
+        params = [[source_data], notebook_id, _template_block()]
         result = self._batchexecute("izAoDd", params, source_path=f"/notebook/{notebook_id}")
         try:
             return result[0][0][0][0]
@@ -482,12 +576,10 @@ class NotebookLMClient:
 
         filename = file_path.name
         file_size = file_path.stat().st_size
+        content_type = mimetypes.guess_type(filename)[0] or "application/octet-stream"
 
         # Step 1: ファイルソースを登録 → source_id 取得
-        params = [
-            [[filename]], notebook_id, [2],
-            [1, None, None, None, None, None, None, None, None, None, [1]],
-        ]
+        params = [[[filename]], notebook_id, _template_block()]
         result = self._batchexecute("o4cbdc", params, source_path=f"/notebook/{notebook_id}")
         source_id = self._extract_first_string(result)
         if not source_id:
@@ -501,12 +593,13 @@ class NotebookLMClient:
         })
         headers = {
             "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8",
-            "Origin": BASE_URL,
-            "Referer": f"{BASE_URL}/",
+            "Origin": UPLOAD_BASE_URL,
+            "Referer": f"{UPLOAD_BASE_URL}/",
             "User-Agent": USER_AGENT,
             "x-goog-authuser": "0",
             "x-goog-upload-command": "start",
             "x-goog-upload-header-content-length": str(file_size),
+            "x-goog-upload-header-content-type": content_type,
             "x-goog-upload-protocol": "resumable",
         }
         req = urllib.request.Request(UPLOAD_URL, data=upload_meta.encode("utf-8"), headers=headers, method="POST")
@@ -514,13 +607,14 @@ class NotebookLMClient:
         upload_url = resp.headers.get("x-goog-upload-url")
         if not upload_url:
             raise NotebookLMError("アップロードURLの取得に失敗しました")
+        upload_origin = _trusted_upload_origin(upload_url)
 
         # Step 3: ファイルバイナリを送信（ストリーミング）
         headers = {
             "Content-Type": "application/x-www-form-urlencoded;charset=utf-8",
             "Content-Length": str(file_size),
-            "Origin": BASE_URL,
-            "Referer": f"{BASE_URL}/",
+            "Origin": upload_origin,
+            "Referer": f"{upload_origin}/",
             "User-Agent": USER_AGENT,
             "x-goog-authuser": "0",
             "x-goog-upload-command": "upload, finalize",
@@ -586,6 +680,22 @@ class NotebookLMClient:
             return json.loads(html_lib.unescape(match.group(1)))
         except json.JSONDecodeError:
             return None
+
+    def _extract_interactive_mind_map_data(self, art: list) -> dict | None:
+        """type 4 / variant 4 の mind-map tree JSON を抽出"""
+        try:
+            raw = art[9][3]
+        except (IndexError, TypeError):
+            return None
+        if isinstance(raw, dict):
+            return raw
+        if not isinstance(raw, str) or not raw.strip():
+            return None
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError:
+            return None
+        return parsed if isinstance(parsed, dict) else None
 
     def _artifact_variant_from_data(self, artifact: dict, app_data: dict | None) -> str:
         """詳細 HTML から得たデータを含めて type 4 の種別を判定"""
@@ -817,6 +927,23 @@ class NotebookLMClient:
                         lines.append(f"  Rationale: {rationale}")
         return "\n".join(lines).rstrip() + "\n"
 
+    def _render_mind_map_markdown(self, title: str, tree: dict, indent: int = 0) -> str:
+        """Interactive mind map tree を読みやすい Markdown に変換"""
+        name = self._normalize_artifact_text(tree.get("name")) or "(untitled)"
+        lines = []
+        if indent == 0:
+            lines.extend([f"# {title}", "", "- Artifact subtype: interactive_mind_map", ""])
+        lines.append("  " * indent + f"- {name}")
+        for child in tree.get("children", []) or []:
+            if isinstance(child, dict):
+                child_md = self._render_mind_map_markdown(title, child, indent + 1)
+                if indent + 1 > 0:
+                    child_lines = child_md.splitlines()
+                    if child_lines and child_lines[0].startswith("# "):
+                        child_lines = child_lines[4:]
+                    lines.extend(child_lines)
+        return "\n".join(lines).rstrip() + "\n"
+
     def _render_app_artifact_markdown(
         self,
         artifact: dict,
@@ -869,7 +996,7 @@ class NotebookLMClient:
 
     def get_artifact(self, artifact_id: str) -> dict | None:
         """アーティファクト詳細を取得"""
-        result = self._batchexecute("v9rmvd", [artifact_id, [2]])
+        result = self._batchexecute("v9rmvd", [artifact_id])
         if not result or not isinstance(result[0], list):
             return None
         return self._build_artifact_record(result[0])
@@ -927,13 +1054,19 @@ class NotebookLMClient:
                             continue
                     if page_images:
                         info["page_images"] = page_images
-            elif type_code == 4:  # flashcards / quiz
-                html_content = art[9][0] if len(art) > 9 and art[9] else ""
-                if isinstance(html_content, str) and "<html" in html_content.lower():
-                    info["app_html"] = html_content
-                    app_data = self._extract_app_artifact_data(html_content)
-                    if app_data is not None:
-                        info["app_data"] = app_data
+            elif type_code == 4:  # flashcards / quiz / interactive mind map
+                variant = self._artifact_variant_from_raw(art)
+                if variant == "interactive_mind_map":
+                    tree = self._extract_interactive_mind_map_data(art)
+                    if tree is not None:
+                        info["structured_content"] = tree
+                else:
+                    html_content = art[9][0] if len(art) > 9 and art[9] else ""
+                    if isinstance(html_content, str) and "<html" in html_content.lower():
+                        info["app_html"] = html_content
+                        app_data = self._extract_app_artifact_data(html_content)
+                        if app_data is not None:
+                            info["app_data"] = app_data
             elif type_code == 9:  # data_table
                 try:
                     info["content"] = self._extract_data_table(art[18])
@@ -971,15 +1104,38 @@ class NotebookLMClient:
         return buf.getvalue()
 
     def _download_app_artifact(self, artifact: dict, dest_path: str | Path) -> bool:
-        """type 4 アーティファクトを Markdown + HTML + JSON で保存"""
+        """type 4 artifact を subtype に応じて Markdown + JSON/HTML で保存"""
         dest_path = Path(dest_path)
         dest_path.parent.mkdir(parents=True, exist_ok=True)
 
         detail = artifact
-        if not artifact.get("app_html"):
+        variant = artifact.get("variant")
+        needs_detail = (
+            not artifact.get("app_html")
+            and artifact.get("structured_content") is None
+        )
+        if needs_detail:
             detail = self.get_artifact(artifact.get("id", ""))
             if not detail:
                 return False
+            variant = detail.get("variant") or variant
+
+        if variant == "interactive_mind_map":
+            tree = detail.get("structured_content")
+            if tree is None:
+                tree = self._extract_interactive_mind_map_data(detail.get("_raw", []))
+            if not isinstance(tree, dict):
+                return False
+            json_dest = dest_path.with_suffix(".json")
+            markdown = self._render_mind_map_markdown(
+                detail.get("title", "Untitled"),
+                tree,
+            )
+            with open(dest_path, "w", encoding="utf-8") as f:
+                f.write(markdown)
+            with open(json_dest, "w", encoding="utf-8") as f:
+                json.dump(tree, f, ensure_ascii=False, indent=2)
+            return True
 
         html_content = detail.get("app_html")
         if not isinstance(html_content, str) or not html_content:

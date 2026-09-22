@@ -36,6 +36,8 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 
+from notebooklm_client import BASE_URL
+
 DEFAULT_COOKIES_PATH = Path.home() / ".notebooklm-mcp-cli" / "profiles" / "default" / "cookies.json"
 REQUIRED_COOKIES = {"SID", "HSID", "SSID", "APISID", "SAPISID"}
 CDP_PORT = 9222
@@ -600,7 +602,7 @@ def cdp_login(browser_key: str, browsers: dict, output_path: Path) -> list[dict]
             f"--user-data-dir={tmpdir}",
             "--no-first-run",
             "--no-default-browser-check",
-            "https://notebooklm.google.com/",
+            f"{BASE_URL}/",
         ],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
@@ -713,7 +715,7 @@ def firefox_login(info: dict) -> list[dict]:
                     "-no-remote",
                     "-profile",
                     str(profile_dir),
-                    "https://notebooklm.google.com/",
+                    f"{BASE_URL}/",
                 ],
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
