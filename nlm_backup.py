@@ -110,6 +110,26 @@ def save_pdf_source(client: NotebookLMClient, content: dict, out_dir: Path) -> l
 # アーティファクトの保存
 # ---------------------------------------------------------------------------
 
+def save_artifact_raw_snapshot(artifact: dict, art_dir: Path, stem: str) -> Path:
+    """Studio artifact の生 payload を将来の再解析用に JSON 保存"""
+    raw_dir = art_dir / "_raw"
+    raw_dir.mkdir(parents=True, exist_ok=True)
+    dest = _unique_path(raw_dir / f"{stem}.json")
+    snapshot = {
+        "id": artifact.get("id"),
+        "title": artifact.get("title"),
+        "type": artifact.get("type"),
+        "type_code": artifact.get("type_code"),
+        "variant": artifact.get("variant"),
+        "status": artifact.get("status"),
+        "status_code": artifact.get("status_code"),
+        "raw": artifact.get("_raw"),
+    }
+    with open(dest, "w", encoding="utf-8") as f:
+        json.dump(snapshot, f, ensure_ascii=False, indent=2)
+    return dest
+
+
 def save_artifacts(client: NotebookLMClient, artifacts: list[dict], out_dir: Path) -> int:
     """アーティファクトをダウンロード"""
     art_dir = out_dir / "artifacts"
@@ -120,15 +140,25 @@ def save_artifacts(client: NotebookLMClient, artifacts: list[dict], out_dir: Pat
         art_type = art.get("type", "unknown")
         status = art.get("status", "")
 
-        if status != "completed":
-            print(f"    [{art_type}] (status: {status}, skipped)")
-            continue
-
-        ext = ARTIFACT_EXTENSIONS.get(art_type, ".bin")
         raw_title = sanitize_filename(art.get("title", "") or "")
         stem = Path(raw_title).stem if raw_title else art_type
         if not stem:
             stem = art_type
+
+        # Google が Studio schema を変更しても、生 payload は必ず残す。
+        # これにより後から parser を更新して再解析できる。
+        raw_snapshot = save_artifact_raw_snapshot(art, art_dir, stem)
+
+        if status != "completed":
+            print(
+                f"    [{art_type}] (status: {status}, skipped; "
+                f"raw: {raw_snapshot.relative_to(art_dir)})"
+            )
+            continue
+
+        ext = ARTIFACT_EXTENSIONS.get(art_type, ".bin")
+        if art.get("structured_content") is not None and not art.get("content") and not art.get("app_html"):
+            ext = ".json"
         dest = art_dir / f"{stem}{ext}"
 
         # 同名ファイルがある場合はナンバリング
@@ -144,7 +174,7 @@ def save_artifacts(client: NotebookLMClient, artifacts: list[dict], out_dir: Pat
             print("OK")
             count += 1
         else:
-            print("FAIL")
+            print(f"FAIL (raw preserved: {raw_snapshot.relative_to(art_dir)})")
 
         # スライドデッキの PPTX をダウンロード
         if art.get("pptx_url"):
