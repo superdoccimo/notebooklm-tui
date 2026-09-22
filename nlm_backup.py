@@ -303,6 +303,8 @@ def _artifact_extension(artifact: dict) -> str:
     variant = artifact.get("variant")
     if variant == "interactive_mind_map":
         return ".md"
+    if art_type in {"guided_view", "fantasy_map", "mind_map", "file"} and not artifact.get("download_url"):
+        return ".json"
     if (
         artifact.get("structured_content") is not None
         and not artifact.get("content")
