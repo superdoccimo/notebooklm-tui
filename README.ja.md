@@ -4,21 +4,21 @@
 
 > このツールが役に立ったら、ぜひスターをお願いします。
 
-Gemini Notebook（旧 NotebookLM）のデータをバックアップ＆リストアできる CLI/TUI ツールです。
+Gemini Notebook（旧 NotebookLM）をバックアップし、サーバー側に忠実な書き戻し経路があるデータを意味を保ってリストアする CLI/TUI ツールです。
 
 - ソースをバックアップし、direct downloadがあるアップロードファイルは原本を優先保存。ない場合は抽出テキスト/レンダリング内容へfallback
 - 生成コンテンツをエクスポート（音声・動画・スライド＋PPTX・レポート・インフォグラフィック・データテーブル・マインドマップ）
 - 新しいQuiz形式にも耐えるschema-tolerantなフラッシュカード・クイズ保存
 - Studio artifactごとの生JSON snapshotを保存し、将来の形式追加でもpayloadを捨てない
 - ノートをバックアップ
-- ローカルバックアップからノートブックを復元
+- URL・原本ファイル・Native Note・note-backed Mind Mapを意味を保って復元し、fallback画像を別sourceへ勝手に変換しない
 - 外部Pythonパッケージ不要
 
 > **2026年9月互換対応:** 現在の `notebook.google.com` を既定hostにし、notebook作成/取得、URL・text source追加、file登録を現行request wrapperへ更新しました。Quizはshort answer / multiple select / fill in the blank等の複数schemaを許容し、Interactive Mind MapはMarkdown + JSONで保存します。CLI/TUI 3種は同じartifact exporterを使い、全Studio artifactの生payloadも `artifacts/_raw/` に保存します。Interactive Learning Overviewはartifact rowにHTML/structured payloadが現れた場合に保全しますが、まだ実payloadを観測していない形式の完全再現は保証しません。
 
 - **nlm-login** — ブラウザから認証クッキーを自動取得（Edge/Chrome/Brave/Firefox対応）
 - **nlm-backup** — ソース・アーティファクト・ノートを一括ダウンロード
-- **nlm-upload** — ファイルやURLを一括アップロード、バックアップからの復元
+- **nlm-upload** — ファイルやURLを一括アップロード、backup sidecarに基づく意味保存リストア
 - **nlm-tui** — 日本語UIのTUIで選択・閲覧・一括バックアップ
 - **nlm-tui-en** — 英語UIのTUIで選択・閲覧・一括バックアップ
 - **nlm-tui-curses** — 任意利用の curses ベースちらつき抑制TUI（実験的・Windowsでは追加セットアップが必要な場合あり）
@@ -55,8 +55,11 @@ python nlm_backup.py --all
 # ファイルを新しいノートブックにアップロード
 python nlm_upload.py "My Research" paper.pdf notes.md
 
-# バックアップから復元
+# backupから意味を保てる範囲を復元
 python nlm_upload.py --restore ./downloads/My_Notebook/
+
+# sourceがreadyになるまでの最大待ち時間を調整
+python nlm_upload.py --restore ./downloads/My_Notebook/ --wait-timeout 300
 ```
 
 TUIで操作する場合：
@@ -215,6 +218,28 @@ nlm-upload --types
 
 > `pip install .` していない場合は `nlm-upload` の代わりに `python nlm_upload.py` を使ってください。
 
+## リストアの意味
+
+backup schema v2では `sources/_metadata/`、`notes/_metadata/`、`mindmaps/_metadata/` にrestore用sidecarを保存します。期限付き・capability付きのdownload URLはsidecarへ保存しません。
+
+`nlm-upload --restore` は、元と同じ意味で戻せるものと、戻せないものを区別します。
+
+| Backup内容 | Restore動作 |
+|---|---|
+| canonical URLがあるWeb / YouTube source | URLとして再追加 |
+| 原本ファイルを取得できたsource | その原本をupload |
+| Pasted text / Markdown fallback | text sourceとして復元 |
+| Native Note | Gemini NotebookのNative Noteとして再作成 |
+| note-backed Mind Map JSON | JSON-backed Note / Mind Mapとして再作成 |
+| 原本がなくrendered imageだけの画像 | rendered imageを戻し、`DEGRADED` と記録 |
+| 原本PDFがなくページ画像だけ | ローカル保全のみ。**各ページを別々の画像sourceとしてuploadしない** |
+| 元形式がなく抽出テキストだけ残ったsource | 内容はtext sourceとして戻せるが `DEGRADED` と記録 |
+| Studio artifacts（Audio/Video/Report/Quiz等） | ダウンロード済み証拠をローカル保全。**再生成しない**。再生成は元artifactの復元ではなく新しいAI出力になるため |
+
+restore後には `restore-report-<new-notebook-id>.json` を出力し、各項目を `restored` / `degraded` / `preserved_only` / `failed` で記録します。制約が残る場合、端末表示も `COMPLETE WITH LIMITATIONS` とし、完全復元したようには表示しません。
+
+sidecarがない旧backupは保守的に扱います。`sources/` 直下のファイルだけを対象にし、旧PDFのページ画像directoryを再帰的にuploadすることはありません。
+
 ## Usage: nlm-tui / nlm-tui-en (ターミナルUI)
 
 ```bash
@@ -312,6 +337,7 @@ downloads/
 └── <Notebook Title>/
     ├── metadata.json          # ノートブック情報（ID、タイトル、更新日時）
     ├── sources/               # アップロードしたソース
+    │   ├── _metadata/          # source type/URL/fileのrestore-safe mapping
     │   ├── document.md        # 抽出テキスト / Web内容
     │   ├── research.docx      # direct downloadがある場合はアップロード原本
     │   ├── recording.m4a      # 利用可能な場合は音声原本
@@ -332,8 +358,13 @@ downloads/
     │   ├── quiz.html
     │   ├── quiz.json
     │   └── ...
-    └── notes/                 # ユーザーが作成したノート
-        └── my_note.md
+    ├── notes/                 # ユーザーが作成したNative Note
+    │   ├── _metadata/          # Native Note restore mapping
+    │   └── my_note.md
+    └── mindmaps/
+        ├── _metadata/          # note-backed Mind Map restore mapping
+        ├── my_map.json
+        └── my_map.md
 ```
 
 ## What Gets Downloaded
