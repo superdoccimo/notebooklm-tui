@@ -22,6 +22,7 @@ Gemini Notebook（旧 NotebookLM）のデータをバックアップ＆リスト
 - **nlm-tui** — 日本語UIのTUIで選択・閲覧・一括バックアップ
 - **nlm-tui-en** — 英語UIのTUIで選択・閲覧・一括バックアップ
 - **nlm-tui-curses** — 任意利用の curses ベースちらつき抑制TUI（実験的・Windowsでは追加セットアップが必要な場合あり）
+- **nlm-canary** — Release前に実Notebookでbackup互換性を検証するlive canary
 
 **コアCLIと標準TUIは外部パッケージ依存ゼロ** — Python 標準ライブラリのみで動作します。  
 Windows / Python 3.14 では `nlm_tui.py` / `nlm_tui_en.py` の利用を推奨します。`nlm_tui_curses.py` は環境によって追加セットアップが必要です（後述）。
@@ -133,8 +134,38 @@ python nlm_backup.py --list
 
 ```bash
 pip install .
-# → nlm-backup, nlm-upload, nlm-login, nlm-tui, nlm-tui-en, nlm-tui-curses コマンドが使えるようになる
+# → nlm-backup, nlm-upload, nlm-login, nlm-tui, nlm-tui-en, nlm-tui-curses, nlm-canary コマンドが使えるようになる
 ```
+
+
+## Release前 Live Canary
+
+Releaseを公開する前に、代表的なStudio artifactを入れた実Notebookに対してcanaryを実行します。
+
+```bash
+# 読み取り専用: 現在入っているものを棚卸し
+nlm-canary --notebook-id <notebook-id> --profile inventory
+
+# Release gate: 現在の主要互換対象が実際に保存できることを要求
+nlm-canary --notebook-id <notebook-id> --profile release
+```
+
+`release` profileでは Audio Overview、Video Overview、Slide Deck、Report、Data Table、Flashcards、Quiz、Interactive Mind Map、Infographic、Interactive Learning Overview型のreport payloadについて、completed artifactのexport成功を確認します。対象Notebookは変更せず、ローカルbackupと `canary-report.json` だけを生成します。
+
+Short Video Overviewを確認する場合は、release-canary用NotebookのVideo artifact自体をShortで作っておきます。現在のlist rowにはShort/Explainerを安定して識別できる人間向けlabelがないため、canaryはその実video artifactをmediaとして正常exportできることを確認します。
+
+write/read wrapperのlive確認は別モードです。
+
+```bash
+# このコマンド自身が作ったdisposable notebookだけを書き込み・削除します。
+# pasted-text追加 → readback → backup → finallyで同じNotebookを削除。
+nlm-canary --write-smoke
+
+# URL source経路も同時に確認
+nlm-canary --write-smoke --smoke-url https://example.com
+```
+
+終了コードは、PASS=`0`、coverage不足/保存失敗=`2`、認証失敗=`3`、その他のエラー=`1` です。GitHub Release公開はlive reportがPASSした後の、人間承認が必要な別操作として残します。
 
 ## Usage: nlm-backup (ダウンロード)
 
