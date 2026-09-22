@@ -105,58 +105,433 @@ def upload_files(client: NotebookLMClient, notebook_id: str, files: list[Path]) 
     return ok, fail
 
 
-def restore_backup(client: NotebookLMClient, backup_dir: Path) -> bool:
-    """バックアップディレクトリからノートブックを復元"""
+def _read_json(path: Path) -> dict:
+    with open(path, encoding="utf-8") as f:
+        data = json.load(f)
+    if not isinstance(data, dict):
+        raise ValueError(f"JSON object expected: {path}")
+    return data
+
+
+def _metadata_rows(directory: Path) -> list[dict]:
+    meta_dir = directory / "_metadata"
+    if not meta_dir.is_dir():
+        return []
+    rows = []
+    for path in sorted(meta_dir.glob("*.json")):
+        try:
+            row = _read_json(path)
+            row["_metadata_file"] = str(path)
+            rows.append(row)
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            rows.append({
+                "_metadata_file": str(path),
+                "_metadata_error": f"{type(exc).__name__}: {exc}",
+            })
+    return rows
+
+
+def _wait_restored_source(
+    client: NotebookLMClient,
+    notebook_id: str,
+    source_id: str | None,
+    wait_timeout: float,
+) -> bool:
+    if not source_id:
+        return False
+    client.wait_for_source_ready(
+        notebook_id,
+        source_id,
+        timeout=wait_timeout,
+    )
+    return True
+
+
+def _restore_one_source_v2(
+    client: NotebookLMClient,
+    notebook_id: str,
+    sources_dir: Path,
+    row: dict,
+    wait_timeout: float,
+) -> dict:
+    """Restore one schema-v2 source without silently changing its semantic kind."""
+    title = row.get("title") or "Untitled"
+    source_type = row.get("type") or "unknown"
+    mode = row.get("backup_mode")
+    url = row.get("url")
+    files = [
+        sources_dir / rel
+        for rel in row.get("files", [])
+        if isinstance(rel, str)
+    ]
+    files = [path for path in files if path.is_file()]
+
+    result = {
+        "title": title,
+        "type": source_type,
+        "backup_mode": mode,
+        "status": "failed",
+        "restored_as": None,
+        "source_id": None,
+    }
+
+    try:
+        if source_type in {"web_page", "youtube"} and isinstance(url, str) and url.startswith("http"):
+            source_id = client.add_source_url(notebook_id, url)
+            result["source_id"] = source_id
+            result["restored_as"] = "url"
+            _wait_restored_source(client, notebook_id, source_id, wait_timeout)
+            result["status"] = "restored"
+            return result
+
+        if mode == "original" and files:
+            source_id = client.upload_file(notebook_id, files[0])
+            result["source_id"] = source_id
+            result["restored_as"] = "original_file"
+            _wait_restored_source(client, notebook_id, source_id, wait_timeout)
+            result["status"] = "restored"
+            return result
+
+        if source_type == "image" and mode == "rendered-image" and len(files) == 1:
+            source_id = client.upload_file(notebook_id, files[0])
+            result["source_id"] = source_id
+            result["restored_as"] = "rendered_image"
+            _wait_restored_source(client, notebook_id, source_id, wait_timeout)
+            result["status"] = "degraded"
+            result["warning"] = "Original image binary was unavailable; restored the rendered backup image."
+            return result
+
+        if mode == "rendered-pages":
+            result["status"] = "preserved_only"
+            result["reason"] = (
+                "Original PDF binary was unavailable. Rendered pages remain local; "
+                "they are not uploaded as separate image sources."
+            )
+            return result
+
+        if mode == "text" and files:
+            content = files[0].read_text(encoding="utf-8")
+            source_id = client.add_source_text(notebook_id, title, content)
+            result["source_id"] = source_id
+            result["restored_as"] = "text"
+            _wait_restored_source(client, notebook_id, source_id, wait_timeout)
+            if source_type in {"pasted_text", "markdown"}:
+                result["status"] = "restored"
+            else:
+                result["status"] = "degraded"
+                result["warning"] = (
+                    f"Original {source_type} representation was unavailable; "
+                    "restored preserved extracted content as a text source."
+                )
+            return result
+
+        result["status"] = "preserved_only"
+        result["reason"] = "No semantics-preserving restore representation is available."
+        return result
+    except (NotebookLMError, OSError, UnicodeError) as exc:
+        result["status"] = "failed"
+        result["error"] = f"{type(exc).__name__}: {exc}"
+        return result
+
+
+def _restore_sources_v2(
+    client: NotebookLMClient,
+    notebook_id: str,
+    sources_dir: Path,
+    wait_timeout: float,
+) -> list[dict]:
+    rows = _metadata_rows(sources_dir)
+    results = []
+    for row in rows:
+        if row.get("_metadata_error"):
+            results.append({
+                "status": "failed",
+                "type": "unknown",
+                "title": Path(row["_metadata_file"]).name,
+                "error": row["_metadata_error"],
+            })
+            continue
+        result = _restore_one_source_v2(
+            client,
+            notebook_id,
+            sources_dir,
+            row,
+            wait_timeout,
+        )
+        results.append(result)
+        marker = {
+            "restored": "OK",
+            "degraded": "DEGRADED",
+            "preserved_only": "PRESERVED ONLY",
+            "failed": "FAIL",
+        }.get(result["status"], result["status"].upper())
+        print(f"  [{marker}] {result.get('title')} ({result.get('type')})")
+        if result.get("warning"):
+            print(f"    {result['warning']}")
+        if result.get("reason"):
+            print(f"    {result['reason']}")
+        if result.get("error"):
+            print(f"    {result['error']}")
+    return results
+
+
+def _restore_legacy_sources(
+    client: NotebookLMClient,
+    notebook_id: str,
+    sources_dir: Path,
+    wait_timeout: float,
+) -> list[dict]:
+    """Conservative old-backup fallback: never recurse into rendered-PDF page folders."""
+    results = []
+    for path in sorted(p for p in sources_dir.iterdir() if p.is_file() and not p.name.startswith(".")):
+        print(f"  [legacy] {path.name} ... ", end="", flush=True)
+        try:
+            ext = path.suffix.lower()
+            if ext in TEXT_EXTENSIONS:
+                content = path.read_text(encoding="utf-8")
+                source_id = client.add_source_text(notebook_id, path.name, content)
+                restored_as = "text"
+            else:
+                source_id = client.upload_file(notebook_id, path)
+                restored_as = "file"
+            _wait_restored_source(client, notebook_id, source_id, wait_timeout)
+            print("OK")
+            results.append({
+                "title": path.name,
+                "status": "degraded",
+                "restored_as": restored_as,
+                "warning": "Legacy backup has no source sidecar; original source semantics cannot be proven.",
+            })
+        except (NotebookLMError, OSError, UnicodeError) as exc:
+            print(f"FAIL ({exc})")
+            results.append({
+                "title": path.name,
+                "status": "failed",
+                "error": f"{type(exc).__name__}: {exc}",
+            })
+
+    nested = [
+        p for p in sources_dir.iterdir()
+        if p.is_dir() and p.name != "_metadata"
+    ]
+    for directory in nested:
+        results.append({
+            "title": directory.name,
+            "status": "preserved_only",
+            "reason": (
+                "Legacy nested source directory was not uploaded recursively. "
+                "This prevents rendered PDF pages from becoming separate image sources."
+            ),
+        })
+        print(f"  [PRESERVED ONLY] {directory.name}/ (legacy nested source directory)")
+    return results
+
+
+def _restore_notes(
+    client: NotebookLMClient,
+    notebook_id: str,
+    notes_dir: Path,
+) -> list[dict]:
+    rows = _metadata_rows(notes_dir)
+    if not rows:
+        rows = [
+            {"title": path.stem, "file": path.name}
+            for path in sorted(notes_dir.glob("*.md"))
+        ]
+
+    results = []
+    for row in rows:
+        title = row.get("title") or "Untitled"
+        rel = row.get("file")
+        if not isinstance(rel, str):
+            results.append({"title": title, "status": "failed", "error": "Missing note file metadata"})
+            continue
+        path = notes_dir / rel
+        try:
+            content = path.read_text(encoding="utf-8")
+            note_id = client.create_note(notebook_id, title, content)
+            results.append({
+                "title": title,
+                "status": "restored",
+                "note_id": note_id,
+            })
+            print(f"  [OK] {title}")
+        except (NotebookLMError, OSError, UnicodeError) as exc:
+            results.append({
+                "title": title,
+                "status": "failed",
+                "error": f"{type(exc).__name__}: {exc}",
+            })
+            print(f"  [FAIL] {title}: {exc}")
+    return results
+
+
+def _restore_mindmaps(
+    client: NotebookLMClient,
+    notebook_id: str,
+    mindmaps_dir: Path,
+) -> list[dict]:
+    rows = _metadata_rows(mindmaps_dir)
+    if not rows:
+        rows = [
+            {"title": path.stem, "json_file": path.name}
+            for path in sorted(mindmaps_dir.glob("*.json"))
+            if path.parent.name != "_metadata"
+        ]
+
+    results = []
+    for row in rows:
+        title = row.get("title") or "Untitled"
+        rel = row.get("json_file")
+        if not isinstance(rel, str):
+            results.append({"title": title, "status": "failed", "error": "Missing mind-map JSON metadata"})
+            continue
+        path = mindmaps_dir / rel
+        try:
+            raw = path.read_text(encoding="utf-8")
+            parsed = json.loads(raw)
+            if not isinstance(parsed, dict) or not ("children" in parsed or "nodes" in parsed):
+                raise ValueError("Not a recognized mind-map tree")
+            note_id = client.create_note(notebook_id, title, raw)
+            results.append({
+                "title": title,
+                "status": "restored",
+                "note_id": note_id,
+            })
+            print(f"  [OK] {title}")
+        except (NotebookLMError, OSError, UnicodeError, ValueError, json.JSONDecodeError) as exc:
+            results.append({
+                "title": title,
+                "status": "failed",
+                "error": f"{type(exc).__name__}: {exc}",
+            })
+            print(f"  [FAIL] {title}: {exc}")
+    return results
+
+
+def _artifact_preservation_summary(backup_dir: Path) -> dict:
+    art_dir = backup_dir / "artifacts"
+    if not art_dir.is_dir():
+        return {"preserved": False, "file_count": 0}
+    files = [
+        path for path in art_dir.rglob("*")
+        if path.is_file()
+    ]
+    return {
+        "preserved": bool(files),
+        "file_count": len(files),
+        "recreated": 0,
+        "reason": (
+            "Studio artifacts are backed up locally but are not recreated from local files. "
+            "Re-generation would create new AI output rather than restore the original artifact."
+        ),
+    }
+
+
+def restore_backup(
+    client: NotebookLMClient,
+    backup_dir: Path,
+    *,
+    wait_timeout: float = 120.0,
+) -> bool:
+    """Restore the parts of a backup that have semantics-preserving server write paths."""
     meta_path = backup_dir / "metadata.json"
     if not meta_path.exists():
         print(f"[ERROR] metadata.json が見つかりません: {backup_dir}", file=sys.stderr)
         return False
 
-    with open(meta_path, encoding="utf-8") as f:
-        meta = json.load(f)
+    try:
+        meta = _read_json(meta_path)
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        print(f"[ERROR] metadata.json を読めません: {exc}", file=sys.stderr)
+        return False
 
     title = meta.get("title", backup_dir.name)
-    print(f"\n=== 復元: {title} ===")
+    schema_version = int(meta.get("backup_schema_version") or 1)
+    print(f"\n=== 復元: {title} (backup schema v{schema_version}) ===")
 
-    # 新規ノートブック作成
     print(f"  ノートブック作成中: {title} ... ", end="", flush=True)
     try:
         notebook_id = client.create_notebook(title)
-    except NotebookLMError as e:
-        print(f"FAIL ({e})")
+    except NotebookLMError as exc:
+        print(f"FAIL ({exc})")
         return False
     print(f"OK (ID: {notebook_id})")
 
-    # sources/ 内のファイルをアップロード
+    report = {
+        "backup_schema_version": schema_version,
+        "source_notebook_id": meta.get("id"),
+        "restored_notebook_id": notebook_id,
+        "title": title,
+        "sources": [],
+        "notes": [],
+        "mindmaps": [],
+        "artifacts": _artifact_preservation_summary(backup_dir),
+    }
+
     sources_dir = backup_dir / "sources"
-    if sources_dir.exists():
-        files = collect_files([str(sources_dir)])
-        if files:
-            print(f"\n  [Sources] {len(files)} 件")
-            ok, fail = upload_files(client, notebook_id, files)
-            print(f"  Sources: {ok} OK, {fail} FAIL")
+    if sources_dir.is_dir():
+        print("\n  [Sources]")
+        if schema_version >= 2 and (sources_dir / "_metadata").is_dir():
+            report["sources"] = _restore_sources_v2(
+                client,
+                notebook_id,
+                sources_dir,
+                wait_timeout,
+            )
+        else:
+            report["sources"] = _restore_legacy_sources(
+                client,
+                notebook_id,
+                sources_dir,
+                wait_timeout,
+            )
 
-    # notes/ 内のファイルをテキストソースとして追加
     notes_dir = backup_dir / "notes"
-    if notes_dir.exists():
-        note_files = list(notes_dir.glob("*.md"))
-        if note_files:
-            print(f"\n  [Notes] {len(note_files)} 件")
-            for nf in note_files:
-                print(f"  {nf.name} ... ", end="", flush=True)
-                try:
-                    text = nf.read_text(encoding="utf-8")
-                    source_id = client.add_source_text(notebook_id, f"[Note] {nf.stem}", text)
-                    if source_id:
-                        print("OK")
-                    else:
-                        print("FAIL")
-                except NotebookLMError as e:
-                    print(f"FAIL ({e})")
+    if notes_dir.is_dir():
+        print("\n  [Notes]")
+        report["notes"] = _restore_notes(client, notebook_id, notes_dir)
 
-    print(f"\n  復元完了! → Notebook ID: {notebook_id}")
+    mindmaps_dir = backup_dir / "mindmaps"
+    if mindmaps_dir.is_dir():
+        print("\n  [Mindmaps]")
+        report["mindmaps"] = _restore_mindmaps(client, notebook_id, mindmaps_dir)
+
+    if report["artifacts"].get("preserved"):
+        print(
+            "\n  [Studio Artifacts] PRESERVED ONLY "
+            f"({report['artifacts']['file_count']} local files; 0 recreated)"
+        )
+        print(f"    {report['artifacts']['reason']}")
+
+    all_rows = report["sources"] + report["notes"] + report["mindmaps"]
+    failed = [row for row in all_rows if row.get("status") == "failed"]
+    degraded = [
+        row for row in all_rows
+        if row.get("status") in {"degraded", "preserved_only"}
+    ]
+    restored = [row for row in all_rows if row.get("status") == "restored"]
+    report["summary"] = {
+        "restored": len(restored),
+        "degraded_or_preserved_only": len(degraded),
+        "failed": len(failed),
+    }
+
+    report_path = backup_dir / f"restore-report-{notebook_id}.json"
+    try:
+        report_path.write_text(
+            json.dumps(report, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+    except OSError as exc:
+        print(f"  [WARN] restore reportを書けませんでした: {exc}")
+
+    state = "COMPLETE" if not failed else "PARTIAL"
+    print(f"\n  復元 {state} → Notebook ID: {notebook_id}")
+    print(f"  Restored: {len(restored)}, Degraded/Preserved: {len(degraded)}, Failed: {len(failed)}")
     print(f"  {BASE_URL}/notebook/{notebook_id}")
-    return True
+    print(f"  Report: {report_path}")
+    return not failed
 
 
 def print_supported_types():
@@ -182,7 +557,13 @@ def main():
     parser.add_argument("files", nargs="*", help="アップロードするファイルまたはフォルダ")
     parser.add_argument("--to", metavar="NOTEBOOK_ID", help="既存ノートブックに追加")
     parser.add_argument("--url", action="append", default=[], help="追加するURL（複数指定可）")
-    parser.add_argument("--restore", metavar="BACKUP_DIR", help="バックアップから復元")
+    parser.add_argument("--restore", metavar="BACKUP_DIR", help="バックアップから意味を保てる範囲を復元")
+    parser.add_argument(
+        "--wait-timeout",
+        type=float,
+        default=120.0,
+        help="source復元後にreadyを待つ最大秒数 (default: 120)",
+    )
     parser.add_argument("--types", action="store_true", help="対応ファイル形式を表示")
     parser.add_argument("--cookies", type=str, default=None, help="クッキーファイルのパス")
     args = parser.parse_args()
@@ -204,7 +585,7 @@ def main():
         if not backup_dir.is_dir():
             print(f"[ERROR] ディレクトリが見つかりません: {args.restore}", file=sys.stderr)
             sys.exit(1)
-        if not restore_backup(client, backup_dir):
+        if not restore_backup(client, backup_dir, wait_timeout=args.wait_timeout):
             sys.exit(1)
         return
 
