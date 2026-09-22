@@ -18,6 +18,8 @@ from notebooklm_client import (
     NotebookLMClient,
     _is_youtube_url,
     _template_block,
+    _trusted_upload_origin,
+    NotebookLMError,
 )
 
 
@@ -148,6 +150,24 @@ class WireContractTests(unittest.TestCase):
     def test_get_artifact_uses_single_id_parameter(self):
         self.client.get_artifact("artifact-1")
         self.assertEqual(self.calls[0], ("v9rmvd", ["artifact-1"], "/"))
+
+    def test_resumable_upload_url_is_origin_and_path_bound(self):
+        self.assertEqual(
+            _trusted_upload_origin(
+                "https://notebooklm.google.com/upload/_/?upload_id=session"
+            ),
+            "https://notebooklm.google.com",
+        )
+        self.assertEqual(
+            _trusted_upload_origin(
+                "https://notebook.google.com/upload/_/?upload_id=session"
+            ),
+            "https://notebook.google.com",
+        )
+        with self.assertRaises(NotebookLMError):
+            _trusted_upload_origin("https://evil.example/upload/_/?upload_id=session")
+        with self.assertRaises(NotebookLMError):
+            _trusted_upload_origin("https://notebook.google.com/not-upload/?id=session")
 
     def test_source_row_exposes_original_download_metadata(self):
         meta = [None] * 8
