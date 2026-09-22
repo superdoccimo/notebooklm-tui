@@ -9,6 +9,7 @@ from nlm_backup import (
     sanitize_filename,
     save_artifact,
     save_artifact_raw_snapshot,
+    save_source,
 )
 from nlm_upload import collect_files
 from notebooklm_client import (
@@ -147,6 +148,33 @@ class WireContractTests(unittest.TestCase):
     def test_get_artifact_uses_single_id_parameter(self):
         self.client.get_artifact("artifact-1")
         self.assertEqual(self.calls[0], ("v9rmvd", ["artifact-1"], "/"))
+
+    def test_source_row_exposes_original_download_metadata(self):
+        meta = [None] * 8
+        meta[4] = 11
+        meta[7] = ["https://example.com/canonical"]
+        row = [None] * 8
+        row[0] = ["source-file"]
+        row[1] = "report.docx"
+        row[2] = meta
+        row[5] = "https://download.example/report.docx"
+        row[6] = "https://viewer.example/report.docx"
+        row[7] = [None, None, "application/vnd.openxmlformats-officedocument.wordprocessingml.document"]
+
+        def rpc(rpc_id, params, source_path="/"):
+            self.calls.append((rpc_id, params, source_path))
+            return [[None, [row]]]
+
+        self.client._batchexecute = rpc
+        sources = self.client.list_sources("nb-1")
+
+        self.assertEqual(len(sources), 1)
+        source = sources[0]
+        self.assertEqual(source["type"], "docx")
+        self.assertEqual(source["url"], "https://example.com/canonical")
+        self.assertEqual(source["download_url"], "https://download.example/report.docx")
+        self.assertEqual(source["content_mime"], row[7][2])
+        self.assertEqual(source["_raw"], row)
 
 
 class ArtifactCompatibilityTests(unittest.TestCase):
@@ -313,6 +341,66 @@ class ArtifactCompatibilityTests(unittest.TestCase):
 
         self.assertEqual(saved["type_code"], 42)
         self.assertEqual(saved["raw"], ["opaque", {"future": True}])
+
+
+class SourceBackupTests(unittest.TestCase):
+    def test_original_file_is_preferred_over_extracted_text(self):
+        class FakeClient:
+            def __init__(self):
+                self.content_called = False
+
+            def download_url(self, url, dest):
+                Path(dest).write_bytes(b"original-docx")
+                return True
+
+            def get_source_content(self, source_id):
+                self.content_called = True
+                raise AssertionError("content fallback should not run")
+
+        source = {
+            "id": "src-1",
+            "title": "research.docx",
+            "type": "docx",
+            "content_mime": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            "download_url": "https://download.example/research.docx",
+        }
+        client = FakeClient()
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            result = save_source(client, source, Path(temp_dir))
+            payload = result["paths"][0].read_bytes()
+
+        self.assertTrue(result["saved"])
+        self.assertEqual(result["mode"], "original")
+        self.assertEqual(payload, b"original-docx")
+        self.assertFalse(client.content_called)
+
+    def test_failed_original_download_falls_back_to_source_content(self):
+        class FakeClient:
+            def download_url(self, url, dest):
+                return False
+
+            def get_source_content(self, source_id):
+                return {
+                    "title": "Website",
+                    "content": "fallback text",
+                    "source_type": "web_page",
+                }
+
+        source = {
+            "id": "src-web",
+            "title": "Website",
+            "type": "web_page",
+            "download_url": "https://download.example/temporary",
+        }
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            result = save_source(FakeClient(), source, Path(temp_dir))
+            payload = result["paths"][0].read_text(encoding="utf-8")
+
+        self.assertTrue(result["saved"])
+        self.assertEqual(result["mode"], "text")
+        self.assertEqual(payload, "fallback text")
 
 
 class UploadHelperTests(unittest.TestCase):
