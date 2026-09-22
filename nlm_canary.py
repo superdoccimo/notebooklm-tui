@@ -54,23 +54,32 @@ def _now_slug() -> str:
 
 
 def _artifact_labels(artifact: dict) -> set[str]:
-    """Return user-facing capability labels represented by one artifact row."""
-    labels: set[str] = set()
+    """Return release-capability labels represented by one artifact row.
+
+    Type-4 rows and interactive report-family rows are deliberately classified
+    by their concrete subtype so one Quiz cannot satisfy the Flashcards release
+    check, and one Interactive Learning Overview cannot also satisfy the plain
+    Report check.
+    """
     art_type = artifact.get("type")
     variant = artifact.get("variant")
-    if isinstance(art_type, str) and art_type:
-        labels.add(art_type)
-    if isinstance(variant, str) and variant:
-        labels.add(variant)
 
-    # Current Interactive Learning Overview observations ride the report family.
-    # We only apply this label when the row actually exposes interactive HTML or
-    # structured content, rather than guessing from the title.
+    if art_type == "flashcards":
+        if variant in {"flashcards", "quiz", "interactive_mind_map"}:
+            return {variant}
+        return {"flashcards"}
+
     if art_type == "report" and (
         artifact.get("app_html")
         or artifact.get("structured_content") is not None
     ):
-        labels.add("interactive_learning_overview")
+        return {"interactive_learning_overview"}
+
+    labels: set[str] = set()
+    if isinstance(art_type, str) and art_type:
+        labels.add(art_type)
+    if isinstance(variant, str) and variant:
+        labels.add(variant)
     return labels
 
 
