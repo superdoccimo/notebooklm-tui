@@ -433,10 +433,31 @@ class NotebookLMClient:
                     type_code = meta[4]
                 source_type = SOURCE_TYPES.get(type_code, "unknown")
 
-                # URL（もしあれば）
+                # URL（Web/YouTube source）
                 url = None
                 if meta and len(meta) > 7 and isinstance(meta[7], list) and meta[7]:
                     url = meta[7][0]
+                elif meta and len(meta) > 5 and isinstance(meta[5], list) and meta[5]:
+                    url = meta[5][0]
+
+                # Current source rows expose original uploaded-file download URL
+                # at index 5 and the true content MIME at [7][2].
+                download_url = None
+                if len(src) > 5 and isinstance(src[5], str) and src[5].startswith("http"):
+                    download_url = src[5]
+
+                viewer_url = None
+                if len(src) > 6 and isinstance(src[6], str) and src[6].startswith("http"):
+                    viewer_url = src[6]
+
+                content_mime = None
+                if (
+                    len(src) > 7
+                    and isinstance(src[7], list)
+                    and len(src[7]) > 2
+                    and isinstance(src[7][2], str)
+                ):
+                    content_mime = src[7][2]
 
                 sources.append({
                     "id": src_id,
@@ -444,6 +465,10 @@ class NotebookLMClient:
                     "type": source_type,
                     "type_code": type_code,
                     "url": url,
+                    "download_url": download_url,
+                    "viewer_url": viewer_url,
+                    "content_mime": content_mime,
+                    "_raw": src,
                 })
             except (IndexError, TypeError):
                 continue
