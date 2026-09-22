@@ -35,6 +35,7 @@ ARTIFACT_EXTENSIONS = {
     "fantasy_map": ".json",
     "infographic": ".png",
     "file": ".bin",
+    "guided_view": ".json",
 }
 
 
@@ -129,34 +130,124 @@ def _source_original_path(source: dict, out_dir: Path) -> Path:
     return _unique_path(out_dir / "sources" / f"{stem}{suffix}")
 
 
-def save_source(client: NotebookLMClient, source: dict, out_dir: Path) -> dict:
+def _source_metadata_path(source: dict, out_dir: Path) -> Path:
+    meta_dir = out_dir / "sources" / "_metadata"
+    meta_dir.mkdir(parents=True, exist_ok=True)
+    source_id = sanitize_filename(str(source.get("id") or "source"))
+    return _unique_path(meta_dir / f"{source_id}.json")
+
+
+def _write_source_metadata(source: dict, result: dict, out_dir: Path) -> Path:
+    """Persist restore-safe source metadata without signed download capability URLs."""
+    source_root = out_dir / "sources"
+    files = []
+    for path in result.get("paths", []):
+        try:
+            files.append(str(Path(path).relative_to(source_root)))
+        except ValueError:
+            files.append(str(Path(path)))
+
+    payload = {
+        "schema_version": 1,
+        "id": source.get("id"),
+        "title": source.get("title"),
+        "type": source.get("type"),
+        "type_code": source.get("type_code"),
+        "raw_type_code": source.get("raw_type_code"),
+        "status": source.get("status"),
+        "status_code": source.get("status_code"),
+        "url": source.get("url"),
+        "content_mime": source.get("content_mime"),
+        "drive_mime": source.get("drive_mime"),
+        "backup_mode": result.get("mode"),
+        "saved": bool(result.get("saved")),
+        "files": files,
+        "error": result.get("error"),
+    }
+    dest = _source_metadata_path(source, out_dir)
+    with open(dest, "w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False, indent=2)
+    return dest
+
+
+def save_source(
+    client: NotebookLMClient,
+    source: dict,
+    out_dir: Path,
+    *,
+    wait_timeout: float = 120.0,
+) -> dict:
     """Save one source, preferring the original uploaded file when available."""
     source_id = source.get("id")
     if not source_id:
-        return {"saved": False, "mode": "missing-id", "paths": []}
+        result = {"saved": False, "mode": "missing-id", "paths": []}
+        result["metadata_path"] = _write_source_metadata(source, result, out_dir)
+        return result
 
-    original_url = source.get("download_url")
-    if isinstance(original_url, str) and original_url.startswith("http"):
-        dest = _source_original_path(source, out_dir)
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        if client.download_url(original_url, dest):
-            return {"saved": True, "mode": "original", "paths": [dest]}
+    current = source
+    status = current.get("status")
+    if status in {"pending", "preparing"}:
         try:
-            dest.unlink(missing_ok=True)
-        except OSError:
-            pass
+            current = client.wait_for_source_ready(
+                current.get("notebook_id") or "",
+                source_id,
+                timeout=wait_timeout,
+            )
+        except NotebookLMError as exc:
+            result = {
+                "saved": False,
+                "mode": "not-ready",
+                "paths": [],
+                "error": str(exc),
+            }
+            result["metadata_path"] = _write_source_metadata(current, result, out_dir)
+            return result
+    elif status in {"error", "pending_deletion"}:
+        result = {
+            "saved": False,
+            "mode": f"status-{status}",
+            "paths": [],
+        }
+        result["metadata_path"] = _write_source_metadata(current, result, out_dir)
+        return result
 
-    content = client.get_source_content(source_id)
-    source_type = source.get("type", "unknown")
-    if source_type == "image":
-        paths = save_image_source(client, content, out_dir)
-        return {"saved": bool(paths), "mode": "rendered-image", "paths": paths}
-    if source_type == "pdf":
-        paths = save_pdf_source(client, content, out_dir)
-        return {"saved": bool(paths), "mode": "rendered-pages", "paths": paths}
+    try:
+        original_url = current.get("download_url")
+        if isinstance(original_url, str) and original_url.startswith("http"):
+            dest = _source_original_path(current, out_dir)
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            if client.download_url(original_url, dest):
+                result = {"saved": True, "mode": "original", "paths": [dest]}
+                result["metadata_path"] = _write_source_metadata(current, result, out_dir)
+                return result
+            try:
+                dest.unlink(missing_ok=True)
+            except OSError:
+                pass
 
-    path = save_text_source(client, content, out_dir)
-    return {"saved": True, "mode": "text", "paths": [path]}
+        content = client.get_source_content(source_id)
+        source_type = current.get("type", "unknown")
+        if source_type == "image":
+            paths = save_image_source(client, content, out_dir)
+            result = {"saved": bool(paths), "mode": "rendered-image", "paths": paths}
+        elif source_type == "pdf":
+            paths = save_pdf_source(client, content, out_dir)
+            result = {"saved": bool(paths), "mode": "rendered-pages", "paths": paths}
+        else:
+            path = save_text_source(client, content, out_dir)
+            result = {"saved": True, "mode": "text", "paths": [path]}
+    except (NotebookLMError, OSError) as exc:
+        result = {
+            "saved": False,
+            "mode": "exception",
+            "paths": [],
+            "error": f"{type(exc).__name__}: {exc}",
+        }
+        result["metadata_path"] = _write_source_metadata(current, result, out_dir)
+        raise
+
+    result["metadata_path"] = _write_source_metadata(current, result, out_dir)
+    return result
 
 
 def save_pdf_source(client: NotebookLMClient, content: dict, out_dir: Path) -> list[Path]:
@@ -307,6 +398,8 @@ def save_artifacts(client: NotebookLMClient, artifacts: list[dict], out_dir: Pat
 def save_notes(notes: list[dict], out_dir: Path) -> int:
     note_dir = out_dir / "notes"
     note_dir.mkdir(parents=True, exist_ok=True)
+    meta_dir = note_dir / "_metadata"
+    meta_dir.mkdir(parents=True, exist_ok=True)
     count = 0
 
     for note in notes:
@@ -325,6 +418,15 @@ def save_notes(notes: list[dict], out_dir: Path) -> int:
         print(f"    {dest.name} ... ", end="", flush=True)
         with open(dest, "w", encoding="utf-8") as f:
             f.write(content)
+        note_meta = {
+            "schema_version": 1,
+            "id": note.get("id"),
+            "title": note.get("title", "Untitled"),
+            "file": str(dest.relative_to(note_dir)),
+        }
+        meta_name = sanitize_filename(str(note.get("id") or dest.stem)) + ".json"
+        with open(_unique_path(meta_dir / meta_name), "w", encoding="utf-8") as f:
+            json.dump(note_meta, f, ensure_ascii=False, indent=2)
         print("OK")
         count += 1
     return count
@@ -348,6 +450,8 @@ def save_mindmaps(mindmaps: list[dict], out_dir: Path) -> int:
         return 0
     mm_dir = out_dir / "mindmaps"
     mm_dir.mkdir(parents=True, exist_ok=True)
+    meta_dir = mm_dir / "_metadata"
+    meta_dir.mkdir(parents=True, exist_ok=True)
     count = 0
 
     for mm in mindmaps:
@@ -375,6 +479,17 @@ def save_mindmaps(mindmaps: list[dict], out_dir: Path) -> int:
                 f.write(md_content)
         except OSError:
             pass
+
+        mm_meta = {
+            "schema_version": 1,
+            "id": mm.get("id"),
+            "title": mm.get("title", "Untitled"),
+            "json_file": str(json_dest.relative_to(mm_dir)),
+            "markdown_file": str(md_dest.relative_to(mm_dir)),
+        }
+        meta_name = sanitize_filename(str(mm.get("id") or json_dest.stem)) + ".json"
+        with open(_unique_path(meta_dir / meta_name), "w", encoding="utf-8") as f:
+            json.dump(mm_meta, f, ensure_ascii=False, indent=2)
 
         count += 1
     return count
@@ -414,7 +529,17 @@ def download_notebook(client: NotebookLMClient, notebook_id: str, out_base: Path
     print(f"{'='*60}")
 
     # --- メタデータ保存 ---
-    meta = {"id": notebook_id, "title": title}
+    meta = {
+        "id": notebook_id,
+        "title": title,
+        "backup_schema_version": 2,
+        "restore_semantics": {
+            "sources": "semantic when source sidecars are present",
+            "notes": "native notes",
+            "mindmaps": "note-backed JSON restore",
+            "studio_artifacts": "local backup only; not recreated from local files",
+        },
+    }
     if notebooks:
         for nb in notebooks:
             if nb["id"] == notebook_id:
@@ -429,6 +554,8 @@ def download_notebook(client: NotebookLMClient, notebook_id: str, out_base: Path
     print(f"\n  [Sources] {len(sources)} 件")
     src_ok = 0
     for src in sources:
+        src = dict(src)
+        src["notebook_id"] = notebook_id
         src_type = src.get("type", "unknown")
         src_title = src.get("title", "untitled")
         src_id = src["id"]
