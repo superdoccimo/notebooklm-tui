@@ -526,7 +526,13 @@ def restore_backup(
     except OSError as exc:
         print(f"  [WARN] restore reportを書けませんでした: {exc}")
 
-    state = "COMPLETE" if not failed else "PARTIAL"
+    has_limitations = bool(degraded) or bool(report["artifacts"].get("preserved"))
+    if failed:
+        state = "PARTIAL"
+    elif has_limitations:
+        state = "COMPLETE WITH LIMITATIONS"
+    else:
+        state = "COMPLETE"
     print(f"\n  復元 {state} → Notebook ID: {notebook_id}")
     print(f"  Restored: {len(restored)}, Degraded/Preserved: {len(degraded)}, Failed: {len(failed)}")
     print(f"  {BASE_URL}/notebook/{notebook_id}")
