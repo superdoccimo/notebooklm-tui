@@ -428,6 +428,202 @@ def _artifact_preservation_summary(backup_dir: Path) -> dict:
     }
 
 
+def build_restore_plan(backup_dir: Path) -> dict:
+    """Inspect a backup without authentication or remote writes."""
+    meta_path = backup_dir / "metadata.json"
+    if not meta_path.is_file():
+        raise ValueError(f"metadata.json not found: {backup_dir}")
+    meta = _read_json(meta_path)
+    schema_version = int(meta.get("backup_schema_version") or 1)
+    plan = {
+        "mode": "dry-run",
+        "backup_schema_version": schema_version,
+        "source_notebook_id": meta.get("id"),
+        "title": meta.get("title", backup_dir.name),
+        "sources": [],
+        "notes": [],
+        "mindmaps": [],
+        "artifacts": _artifact_preservation_summary(backup_dir),
+    }
+
+    sources_dir = backup_dir / "sources"
+    if sources_dir.is_dir():
+        if schema_version >= 2 and (sources_dir / "_metadata").is_dir():
+            for row in _metadata_rows(sources_dir):
+                if row.get("_metadata_error"):
+                    plan["sources"].append({
+                        "title": Path(row["_metadata_file"]).name,
+                        "type": "unknown",
+                        "status": "failed",
+                        "action": "none",
+                        "reason": row["_metadata_error"],
+                    })
+                    continue
+                title = row.get("title") or "Untitled"
+                source_type = row.get("type") or "unknown"
+                mode = row.get("backup_mode")
+                url = row.get("url")
+                files = [
+                    sources_dir / rel
+                    for rel in row.get("files", [])
+                    if isinstance(rel, str)
+                ]
+                files = [path for path in files if path.is_file()]
+                item = {
+                    "title": title,
+                    "type": source_type,
+                    "backup_mode": mode,
+                    "status": "preserved_only",
+                    "action": "none",
+                }
+                if source_type in {"web_page", "youtube"} and isinstance(url, str) and url.startswith("http"):
+                    item.update(status="restored", action="readd_url")
+                elif mode == "original" and files:
+                    item.update(status="restored", action="upload_original_file", file=str(files[0]))
+                elif source_type == "image" and mode == "rendered-image" and len(files) == 1:
+                    item.update(
+                        status="degraded",
+                        action="upload_rendered_image",
+                        file=str(files[0]),
+                        reason="Original image binary is unavailable.",
+                    )
+                elif mode == "rendered-pages":
+                    item.update(
+                        status="preserved_only",
+                        action="keep_local",
+                        reason="Original PDF is unavailable; page images will not be uploaded separately.",
+                    )
+                elif mode == "text" and files:
+                    exact = source_type in {"pasted_text", "markdown"}
+                    item.update(
+                        status="restored" if exact else "degraded",
+                        action="restore_as_text",
+                        file=str(files[0]),
+                    )
+                    if not exact:
+                        item["reason"] = f"Original {source_type} representation is unavailable."
+                else:
+                    item["reason"] = "No semantics-preserving restore representation is available."
+                plan["sources"].append(item)
+        else:
+            for path in sorted(p for p in sources_dir.iterdir() if p.is_file() and not p.name.startswith(".")):
+                plan["sources"].append({
+                    "title": path.name,
+                    "type": "legacy_unknown",
+                    "status": "degraded",
+                    "action": "restore_legacy_top_level_file",
+                    "file": str(path),
+                    "reason": "Legacy backup has no source sidecar; original source semantics cannot be proven.",
+                })
+            for directory in sorted(
+                p for p in sources_dir.iterdir()
+                if p.is_dir() and p.name != "_metadata"
+            ):
+                plan["sources"].append({
+                    "title": directory.name,
+                    "type": "legacy_nested_directory",
+                    "status": "preserved_only",
+                    "action": "keep_local",
+                    "reason": "Nested legacy directories are not recursively uploaded.",
+                })
+
+    notes_dir = backup_dir / "notes"
+    if notes_dir.is_dir():
+        rows = _metadata_rows(notes_dir) or [
+            {"title": path.stem, "file": path.name}
+            for path in sorted(notes_dir.glob("*.md"))
+        ]
+        for row in rows:
+            title = row.get("title") or "Untitled"
+            rel = row.get("file")
+            path = notes_dir / rel if isinstance(rel, str) else None
+            exists = bool(path and path.is_file())
+            plan["notes"].append({
+                "title": title,
+                "status": "restored" if exists else "failed",
+                "action": "create_native_note" if exists else "none",
+                **({"file": str(path)} if path else {}),
+                **({} if exists else {"reason": "Note backup file is missing."}),
+            })
+
+    mindmaps_dir = backup_dir / "mindmaps"
+    if mindmaps_dir.is_dir():
+        rows = _metadata_rows(mindmaps_dir) or [
+            {"title": path.stem, "json_file": path.name}
+            for path in sorted(mindmaps_dir.glob("*.json"))
+        ]
+        for row in rows:
+            title = row.get("title") or "Untitled"
+            rel = row.get("json_file")
+            path = mindmaps_dir / rel if isinstance(rel, str) else None
+            valid = False
+            reason = "Mind-map JSON file is missing."
+            if path and path.is_file():
+                try:
+                    parsed = json.loads(path.read_text(encoding="utf-8"))
+                    valid = isinstance(parsed, dict) and ("children" in parsed or "nodes" in parsed)
+                    if not valid:
+                        reason = "JSON is not a recognized mind-map tree."
+                except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+                    reason = f"{type(exc).__name__}: {exc}"
+            plan["mindmaps"].append({
+                "title": title,
+                "status": "restored" if valid else "failed",
+                "action": "create_json_backed_note" if valid else "none",
+                **({"file": str(path)} if path else {}),
+                **({} if valid else {"reason": reason}),
+            })
+
+    rows = plan["sources"] + plan["notes"] + plan["mindmaps"]
+    restored = sum(row.get("status") == "restored" for row in rows)
+    degraded = sum(row.get("status") in {"degraded", "preserved_only"} for row in rows)
+    failed = sum(row.get("status") == "failed" for row in rows)
+    artifact_limit = bool(plan["artifacts"].get("preserved"))
+    if failed:
+        state = "PARTIAL"
+    elif degraded or artifact_limit:
+        state = "COMPLETE WITH LIMITATIONS"
+    else:
+        state = "COMPLETE"
+    plan["summary"] = {
+        "would_restore": restored,
+        "would_degrade_or_preserve_only": degraded,
+        "would_fail_preflight": failed,
+        "studio_artifacts_preserved_only": artifact_limit,
+        "expected_state": state,
+    }
+    return plan
+
+
+def print_restore_plan(plan: dict) -> None:
+    print(f"\n=== RESTORE DRY RUN: {plan.get('title')} ===")
+    print(f"Backup schema: v{plan.get('backup_schema_version')}")
+    for section in ("sources", "notes", "mindmaps"):
+        rows = plan.get(section, [])
+        if not rows:
+            continue
+        print(f"\n  [{section.capitalize()}]")
+        for row in rows:
+            status = row.get("status", "unknown").upper()
+            action = row.get("action", "none")
+            print(f"  [{status}] {row.get('title')} -> {action}")
+            if row.get("reason"):
+                print(f"    {row['reason']}")
+    artifacts = plan.get("artifacts", {})
+    if artifacts.get("preserved"):
+        print(
+            f"\n  [Studio Artifacts] PRESERVED ONLY "
+            f"({artifacts.get('file_count', 0)} local files; 0 recreated)"
+        )
+    summary = plan["summary"]
+    print(f"\nExpected: {summary['expected_state']}")
+    print(
+        f"Would restore: {summary['would_restore']}, "
+        f"Degraded/Preserved: {summary['would_degrade_or_preserve_only']}, "
+        f"Preflight failures: {summary['would_fail_preflight']}"
+    )
+
+
 def restore_backup(
     client: NotebookLMClient,
     backup_dir: Path,
@@ -565,6 +761,11 @@ def main():
     parser.add_argument("--url", action="append", default=[], help="追加するURL（複数指定可）")
     parser.add_argument("--restore", metavar="BACKUP_DIR", help="バックアップから意味を保てる範囲を復元")
     parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="--restoreの実行計画だけ表示。認証もNotebook作成も行わない",
+    )
+    parser.add_argument(
         "--wait-timeout",
         type=float,
         default=120.0,
@@ -578,6 +779,33 @@ def main():
     if args.types:
         print_supported_types()
         return
+
+    if args.dry_run and not args.restore:
+        parser.error("--dry-run requires --restore")
+
+    # Dry-run is local-only by design: no auth, no remote reads/writes.
+    if args.restore and args.dry_run:
+        backup_dir = Path(args.restore)
+        if not backup_dir.is_dir():
+            print(f"[ERROR] ディレクトリが見つかりません: {args.restore}", file=sys.stderr)
+            sys.exit(1)
+        try:
+            plan = build_restore_plan(backup_dir)
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            print(f"[ERROR] restore planを作成できません: {exc}", file=sys.stderr)
+            sys.exit(1)
+        plan_path = backup_dir / "restore-plan.json"
+        try:
+            plan_path.write_text(
+                json.dumps(plan, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+        except OSError as exc:
+            print(f"[ERROR] restore-plan.jsonを書けません: {exc}", file=sys.stderr)
+            sys.exit(1)
+        print_restore_plan(plan)
+        print(f"Plan: {plan_path}")
+        sys.exit(2 if plan["summary"]["would_fail_preflight"] else 0)
 
     try:
         client = NotebookLMClient(cookies_path=args.cookies)

@@ -4,7 +4,7 @@ import unittest
 from pathlib import Path
 
 from nlm_backup import build_backup_metadata, save_artifact, save_source
-from nlm_upload import restore_backup
+from nlm_upload import build_restore_plan, restore_backup
 from notebooklm_client import NotebookLMClient
 
 
@@ -255,6 +255,109 @@ class BackupEvidenceTests(unittest.TestCase):
         self.assertTrue(result["saved"])
         self.assertEqual(result["dest"].suffix, ".json")
         self.assertEqual(saved["type_code"], 11)
+
+
+class RestoreDryRunTests(unittest.TestCase):
+    def _write_json(self, path, payload):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+
+    def test_dry_run_matches_v2_semantic_categories_without_remote_client(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            self._write_json(
+                root / "metadata.json",
+                {
+                    "id": "old-nb",
+                    "title": "Plan Me",
+                    "backup_schema_version": 2,
+                },
+            )
+            sources = root / "sources"
+            (sources / "doc.docx").parent.mkdir(parents=True, exist_ok=True)
+            (sources / "doc.docx").write_bytes(b"doc")
+            (sources / "paper").mkdir()
+            (sources / "paper" / "page1.png").write_bytes(b"page")
+            self._write_json(
+                sources / "_metadata" / "url.json",
+                {
+                    "title": "Web",
+                    "type": "web_page",
+                    "url": "https://example.com",
+                    "backup_mode": "text",
+                    "files": [],
+                },
+            )
+            self._write_json(
+                sources / "_metadata" / "doc.json",
+                {
+                    "title": "doc.docx",
+                    "type": "docx",
+                    "backup_mode": "original",
+                    "files": ["doc.docx"],
+                },
+            )
+            self._write_json(
+                sources / "_metadata" / "pdf.json",
+                {
+                    "title": "paper.pdf",
+                    "type": "pdf",
+                    "backup_mode": "rendered-pages",
+                    "files": ["paper/page1.png"],
+                },
+            )
+            notes = root / "notes"
+            notes.mkdir()
+            (notes / "Note.md").write_text("note", encoding="utf-8")
+            self._write_json(
+                notes / "_metadata" / "note.json",
+                {"title": "Note", "file": "Note.md"},
+            )
+            artifacts = root / "artifacts"
+            artifacts.mkdir()
+            (artifacts / "report.md").write_text("report", encoding="utf-8")
+
+            plan = build_restore_plan(root)
+
+        actions = {row["title"]: (row["status"], row["action"]) for row in plan["sources"]}
+        self.assertEqual(actions["Web"], ("restored", "readd_url"))
+        self.assertEqual(actions["doc.docx"], ("restored", "upload_original_file"))
+        self.assertEqual(actions["paper.pdf"], ("preserved_only", "keep_local"))
+        self.assertEqual(plan["notes"][0]["action"], "create_native_note")
+        self.assertTrue(plan["artifacts"]["preserved"])
+        self.assertEqual(plan["summary"]["expected_state"], "COMPLETE WITH LIMITATIONS")
+        self.assertEqual(plan["summary"]["would_fail_preflight"], 0)
+
+    def test_dry_run_reports_missing_note_file_before_any_write(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            self._write_json(
+                root / "metadata.json",
+                {"title": "Broken", "backup_schema_version": 2},
+            )
+            self._write_json(
+                root / "notes" / "_metadata" / "note.json",
+                {"title": "Missing", "file": "missing.md"},
+            )
+
+            plan = build_restore_plan(root)
+
+        self.assertEqual(plan["notes"][0]["status"], "failed")
+        self.assertEqual(plan["summary"]["would_fail_preflight"], 1)
+        self.assertEqual(plan["summary"]["expected_state"], "PARTIAL")
+
+    def test_dry_run_legacy_nested_directory_is_preserved_only(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            self._write_json(root / "metadata.json", {"title": "Legacy"})
+            nested = root / "sources" / "paper"
+            nested.mkdir(parents=True)
+            (nested / "page1.png").write_bytes(b"page")
+
+            plan = build_restore_plan(root)
+
+        self.assertEqual(plan["sources"][0]["status"], "preserved_only")
+        self.assertEqual(plan["sources"][0]["action"], "keep_local")
 
 
 class FakeRestoreClient:
