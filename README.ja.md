@@ -6,7 +6,7 @@
 
 Gemini Notebook（旧 NotebookLM）のデータをバックアップ＆リストアできる CLI/TUI ツールです。
 
-- ソースをすべてダウンロード（PDF・テキスト・画像・URL）
+- ソースをバックアップし、direct downloadがあるアップロードファイルは原本を優先保存。ない場合は抽出テキスト/レンダリング内容へfallback
 - 生成コンテンツをエクスポート（音声・動画・スライド＋PPTX・レポート・インフォグラフィック・データテーブル・マインドマップ）
 - 新しいQuiz形式にも耐えるschema-tolerantなフラッシュカード・クイズ保存
 - Studio artifactごとの生JSON snapshotを保存し、将来の形式追加でもpayloadを捨てない
@@ -14,7 +14,7 @@ Gemini Notebook（旧 NotebookLM）のデータをバックアップ＆リスト
 - ローカルバックアップからノートブックを復元
 - 外部Pythonパッケージ不要
 
-> **2026年9月互換対応:** GoogleはInteractive Learning Overviewsと、short answer / multiple select / fill in the blankなどの新しいQuiz形式を順次展開しています。既存のVideo Overview取得は形式に依存しないまま維持し、Quiz exporterは複数schemaを許容するよう拡張しました。さらに全Studio artifactの生payloadを `artifacts/_raw/` に保存します。raw snapshotは後から再解析するための保全データであり、まだ実payloadを観測していない新形式を完全に描画・復元できると保証するものではありません。
+> **2026年9月互換対応:** 現在の `notebook.google.com` を既定hostにし、notebook作成/取得、URL・text source追加、file登録を現行request wrapperへ更新しました。Quizはshort answer / multiple select / fill in the blank等の複数schemaを許容し、Interactive Mind MapはMarkdown + JSONで保存します。CLI/TUI 3種は同じartifact exporterを使い、全Studio artifactの生payloadも `artifacts/_raw/` に保存します。Interactive Learning Overviewはartifact rowにHTML/structured payloadが現れた場合に保全しますが、まだ実payloadを観測していない形式の完全再現は保証しません。
 
 - **nlm-login** — ブラウザから認証クッキーを自動取得（Edge/Chrome/Brave/Firefox対応）
 - **nlm-backup** — ソース・アーティファクト・ノートを一括ダウンロード
@@ -281,9 +281,11 @@ downloads/
 └── <Notebook Title>/
     ├── metadata.json          # ノートブック情報（ID、タイトル、更新日時）
     ├── sources/               # アップロードしたソース
-    │   ├── document.md        # テキスト
-    │   ├── photo.png          # 画像
-    │   └── report/            # PDF (ページごとの画像)
+    │   ├── document.md        # 抽出テキスト / Web内容
+    │   ├── research.docx      # direct downloadがある場合はアップロード原本
+    │   ├── recording.m4a      # 利用可能な場合は音声原本
+    │   ├── paper.pdf          # 利用可能な場合はPDF原本
+    │   └── report/            # 原本を取れないPDFのfallbackページ画像
     │       ├── page1.png
     │       ├── page2.png
     │       └── ...
@@ -308,10 +310,11 @@ downloads/
 ### Sources (自分がアップロードしたもの)
 | Type | Format |
 |------|--------|
-| Text / Markdown | `.md` |
-| Website / URL | `.md` (extracted text) |
-| Image | `.png` |
-| PDF | Page images (`.png` per page) |
+| direct download URLがあるアップロードファイル | 利用可能なら元の拡張子の原本 |
+| Text / Markdown | fallback時は `.md` |
+| Website / URL / YouTube | fallback時は抽出内容を `.md` |
+| Image | 利用可能なら原本、なければレンダリング画像 |
+| PDF | 利用可能なら元の `.pdf`、なければページ画像 |
 
 ### Artifacts (Gemini Notebook / NotebookLM が生成したもの)
 
@@ -325,6 +328,7 @@ downloads/
 | Data Table | `.csv` |
 | Flashcards | `.md` + `.html` + `.json` |
 | Quiz | `.md` + `.html` + `.json` |
+| Interactive Mind Map | `.md` + `.json` |
 | Infographic | `.png` |
 
 ### Notes
@@ -334,7 +338,7 @@ downloads/
 
 ## Architecture
 
-このツールは Google NotebookLM の内部 `batchexecute` API を直接操作します。
+このツールは Gemini Notebook / NotebookLM の内部 `batchexecute` API を直接操作します。既定hostは `https://notebook.google.com` です。必要な場合は `NOTEBOOKLM_BASE_URL=https://notebooklm.google.com` で旧hostへ切り替えられます。
 
 ```
 nlm_login.py            ← 認証ツール（Chromium系: CDP / Firefox: cookies.sqlite）
@@ -361,9 +365,9 @@ notebooklm_client.py    ← API クライアント（batchexecute RPC）
 python nlm_login.py
 ```
 
-### PDF が画像としてダウンロードされる
+### PDF がページ画像へfallbackする
 
-これは仕様です。NotebookLM はアップロードされた PDF をページごとにレンダリングして画像として保管しています。そのため、元の PDF ファイルではなく、各ページの PNG 画像として取得されます。
+現在はsource rowにdirect download URLがある場合、元のPDFを優先して保存します。Gemini Notebook側がそのURLを返さない場合、または原本ダウンロードに失敗した場合だけ、source contentから取得できるページ画像へfallbackします。原本を取得できていないのに取得済みと扱うことはしません。
 
 ### Windows で `ModuleNotFoundError: No module named '_curses'` が出る
 
