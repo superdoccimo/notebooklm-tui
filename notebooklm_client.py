@@ -141,6 +141,8 @@ def _trusted_upload_origin(url: str) -> str:
         raise NotebookLMError("Unexpected resumable upload URL origin")
     if parsed.username or parsed.password:
         raise NotebookLMError("Unexpected credentials in resumable upload URL")
+    if not parsed.path.startswith("/upload/_/"):
+        raise NotebookLMError("Unexpected resumable upload URL path")
     return f"https://{parsed.netloc}"
 
 
