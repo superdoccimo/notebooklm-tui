@@ -17,7 +17,7 @@ class CanaryHelperTests(unittest.TestCase):
             "type": "flashcards",
             "variant": "quiz",
         }
-        self.assertEqual(_artifact_labels(artifact), {"flashcards", "quiz"})
+        self.assertEqual(_artifact_labels(artifact), {"quiz"})
 
     def test_interactive_learning_overview_requires_interactive_payload(self):
         plain = {"type": "report", "variant": None}
@@ -30,8 +30,15 @@ class CanaryHelperTests(unittest.TestCase):
         self.assertEqual(_artifact_labels(plain), {"report"})
         self.assertEqual(
             _artifact_labels(interactive),
-            {"report", "interactive_learning_overview"},
+            {"interactive_learning_overview"},
         )
+
+    def test_flashcards_and_quiz_do_not_satisfy_each_other(self):
+        flashcards = {"type": "flashcards", "variant": "flashcards"}
+        quiz = {"type": "flashcards", "variant": "quiz"}
+
+        self.assertEqual(_artifact_labels(flashcards), {"flashcards"})
+        self.assertEqual(_artifact_labels(quiz), {"quiz"})
 
     def test_release_profile_has_expected_compatibility_surface(self):
         self.assertIn("interactive_learning_overview", RELEASE_REQUIRED_ARTIFACTS)
