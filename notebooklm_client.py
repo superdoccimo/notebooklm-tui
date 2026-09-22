@@ -604,6 +604,120 @@ class NotebookLMClient:
             return ""
         return str(value).replace("\r\n", "\n").strip()
 
+    def _first_artifact_text(self, item: dict, keys: tuple[str, ...]) -> str:
+        """複数候補キーから最初の非空テキストを返す"""
+        for key in keys:
+            if key not in item:
+                continue
+            value = item.get(key)
+            if isinstance(value, dict):
+                for nested_key in ("text", "value", "answer", "label"):
+                    text = self._normalize_artifact_text(value.get(nested_key))
+                    if text:
+                        return text
+                continue
+            text = self._normalize_artifact_text(value)
+            if text:
+                return text
+        return ""
+
+    def _quiz_question_format(self, item: dict) -> str:
+        """新旧 Quiz schema の形式名を best-effort で抽出"""
+        return self._first_artifact_text(
+            item,
+            ("questionType", "question_type", "format", "kind", "type"),
+        )
+
+    def _quiz_options(self, item: dict) -> list[dict]:
+        """answerOptions/options/choices の違いを吸収して正規化"""
+        for key in ("answerOptions", "options", "choices"):
+            raw_options = item.get(key)
+            if not isinstance(raw_options, list):
+                continue
+            options = []
+            for option in raw_options:
+                if isinstance(option, dict):
+                    options.append(option)
+                elif isinstance(option, str):
+                    options.append({"text": option})
+            return options
+        return []
+
+    def _quiz_correct_answers(self, item: dict, options: list[dict]) -> list[str]:
+        """multiple-choice 以外の回答 schema も含めて正答候補を抽出"""
+        answers = []
+
+        for option in options:
+            if not isinstance(option, dict):
+                continue
+            if option.get("isCorrect") is True or option.get("correct") is True:
+                text = self._first_artifact_text(option, ("text", "value", "answer", "label"))
+                if text:
+                    answers.append(text)
+
+        for key in (
+            "correctAnswers",
+            "acceptedAnswers",
+            "expectedAnswers",
+            "answers",
+        ):
+            value = item.get(key)
+            if not isinstance(value, list):
+                continue
+            for answer in value:
+                if isinstance(answer, dict):
+                    text = self._first_artifact_text(
+                        answer,
+                        ("text", "value", "answer", "label"),
+                    )
+                else:
+                    text = self._normalize_artifact_text(answer)
+                if text:
+                    answers.append(text)
+
+        for key in (
+            "correctAnswer",
+            "acceptedAnswer",
+            "expectedAnswer",
+            "answer",
+            "solution",
+        ):
+            if key not in item:
+                continue
+            value = item.get(key)
+            if isinstance(value, list):
+                for answer in value:
+                    text = (
+                        self._first_artifact_text(
+                            answer,
+                            ("text", "value", "answer", "label"),
+                        )
+                        if isinstance(answer, dict)
+                        else self._normalize_artifact_text(answer)
+                    )
+                    if text:
+                        answers.append(text)
+            elif isinstance(value, dict):
+                text = self._first_artifact_text(
+                    value,
+                    ("text", "value", "answer", "label"),
+                )
+                if text:
+                    answers.append(text)
+            else:
+                text = self._normalize_artifact_text(value)
+                if text:
+                    answers.append(text)
+
+        deduped = []
+        seen = set()
+        for answer in answers:
+            if answer in seen:
+                continue
+            seen.add(answer)
+            deduped.append(answer)
+        return deduped
+
     def _render_flashcards_markdown(
         self,
         title: str,
@@ -654,14 +768,15 @@ class NotebookLMClient:
             f"- Structured data: `{json_name}`",
         ]
         for i, item in enumerate(questions, 1):
-            question = self._normalize_artifact_text(item.get("question"))
-            hint = self._normalize_artifact_text(item.get("hint"))
-            options = item.get("answerOptions", [])
-            correct_answers = [
-                self._normalize_artifact_text(option.get("text"))
-                for option in options
-                if isinstance(option, dict) and option.get("isCorrect")
-            ]
+            question = self._first_artifact_text(item, ("question", "prompt", "stem"))
+            hint = self._first_artifact_text(item, ("hint",))
+            question_format = self._quiz_question_format(item)
+            options = self._quiz_options(item)
+            correct_answers = self._quiz_correct_answers(item, options)
+            explanation = self._first_artifact_text(
+                item,
+                ("rationale", "explanation", "feedback"),
+            )
             lines.extend(
                 [
                     "",
@@ -670,18 +785,33 @@ class NotebookLMClient:
                     question or "(empty)",
                 ]
             )
+            if question_format:
+                lines.extend(["", f"Format: {question_format}"])
             if hint:
                 lines.extend(["", f"Hint: {hint}"])
             if correct_answers:
-                lines.extend(["", f"Correct answer: {', '.join(correct_answers)}"])
+                label = "Correct answers" if len(correct_answers) > 1 else "Correct answer"
+                lines.extend(["", f"{label}: {', '.join(correct_answers)}"])
+            if explanation:
+                lines.extend(["", f"Explanation: {explanation}"])
             if options:
                 lines.extend(["", "### Options", ""])
+                correct_set = set(correct_answers)
                 for option in options:
-                    if not isinstance(option, dict):
-                        continue
-                    marker = "x" if option.get("isCorrect") else " "
-                    text = self._normalize_artifact_text(option.get("text"))
-                    rationale = self._normalize_artifact_text(option.get("rationale"))
+                    text = self._first_artifact_text(
+                        option,
+                        ("text", "value", "answer", "label"),
+                    )
+                    is_correct = (
+                        option.get("isCorrect") is True
+                        or option.get("correct") is True
+                        or (text and text in correct_set)
+                    )
+                    marker = "x" if is_correct else " "
+                    rationale = self._first_artifact_text(
+                        option,
+                        ("rationale", "explanation", "feedback"),
+                    )
                     lines.append(f"- [{marker}] {text or '(empty)'}")
                     if rationale:
                         lines.append(f"  Rationale: {rationale}")
@@ -754,9 +884,27 @@ class NotebookLMClient:
                     if isinstance(m, list) and len(m) > 2 and m[2] == "audio/mp4":
                         info["download_url"] = m[0]
                         break
-            elif type_code == 2:  # report
-                if len(art) > 7 and art[7] and art[7][0]:
-                    info["content"] = art[7][0]
+            elif type_code == 2:  # report / interactive learning overview
+                if len(art) > 7 and art[7]:
+                    report_container = art[7]
+                    if isinstance(report_container, list):
+                        payload = report_container[0] if report_container else None
+                    else:
+                        payload = report_container
+
+                    if isinstance(payload, str):
+                        lowered = payload.lstrip().lower()
+                        if "<html" in lowered or "<app-root" in lowered:
+                            info["app_html"] = payload
+                            app_data = self._extract_app_artifact_data(payload)
+                            if app_data is not None:
+                                info["app_data"] = app_data
+                        else:
+                            info["content"] = payload
+                    elif payload is not None:
+                        # Newly introduced report formats may return structured data.
+                        # Keep it exportable even before their schema is fully understood.
+                        info["structured_content"] = payload
             elif type_code == 3:  # video
                 self._find_media_url(art[8] if len(art) > 8 else [], "video/mp4", info)
             elif type_code == 7:  # infographic
@@ -870,13 +1018,19 @@ class NotebookLMClient:
         dest_path = Path(dest_path)
         dest_path.parent.mkdir(parents=True, exist_ok=True)
 
-        if artifact.get("type_code") == 4:
+        if artifact.get("type_code") == 4 or artifact.get("app_html"):
             return self._download_app_artifact(artifact, dest_path)
 
         # インラインコンテンツの場合（report, data_table）
         if "content" in artifact and artifact["content"]:
             with open(dest_path, "w", encoding="utf-8") as f:
                 f.write(artifact["content"])
+            return True
+
+        # 未知/新形式の構造化コンテンツは JSON として保全
+        if "structured_content" in artifact and artifact["structured_content"] is not None:
+            with open(dest_path, "w", encoding="utf-8") as f:
+                json.dump(artifact["structured_content"], f, ensure_ascii=False, indent=2)
             return True
 
         # URLダウンロードの場合
