@@ -15,6 +15,7 @@ Usage:
 
 import argparse
 import json
+import mimetypes
 import re
 import sys
 from datetime import datetime, timezone
@@ -90,6 +91,68 @@ def save_image_source(client: NotebookLMClient, content: dict, out_dir: Path) ->
             if client.download_url(url, dest):
                 saved.append(dest)
     return saved
+
+
+SOURCE_TEXT_TYPES = frozenset({
+    "pasted_text",
+    "web_page",
+    "markdown",
+    "youtube",
+    "media",
+    "powerpoint",
+    "google_spreadsheet",
+    "docx",
+    "excel",
+    "google_drive",
+    "gmail",
+    "csv",
+    "epub",
+    "gemini_chat",
+    "ai_mode_chat",
+    "expert_intelligence",
+    "google_docs",
+    "google_slides",
+    "unknown",
+})
+
+
+def _source_original_path(source: dict, out_dir: Path) -> Path:
+    title = sanitize_filename(source.get("title", "") or "")
+    stem = Path(title).stem if title else source.get("id", "source")
+    suffix = Path(title).suffix
+    if not suffix:
+        suffix = mimetypes.guess_extension(source.get("content_mime") or "") or {
+            "pdf": ".pdf",
+            "image": ".png",
+            "media": ".bin",
+        }.get(source.get("type"), ".bin")
+    return _unique_path(out_dir / "sources" / f"{stem}{suffix}")
+
+
+def save_source(client: NotebookLMClient, source: dict, out_dir: Path) -> dict:
+    """Save one source, preferring the original uploaded file when available."""
+    source_id = source.get("id")
+    if not source_id:
+        return {"saved": False, "mode": "missing-id", "paths": []}
+
+    original_url = source.get("download_url")
+    if isinstance(original_url, str) and original_url.startswith("http"):
+        dest = _source_original_path(source, out_dir)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        if client.download_url(original_url, dest):
+            return {"saved": True, "mode": "original", "paths": [dest]}
+
+    content = client.get_source_content(source_id)
+    source_type = source.get("type", "unknown")
+    if source_type == "image":
+        paths = save_image_source(client, content, out_dir)
+        return {"saved": bool(paths), "mode": "rendered-image", "paths": paths}
+    if source_type == "pdf":
+        paths = save_pdf_source(client, content, out_dir)
+        return {"saved": bool(paths), "mode": "rendered-pages", "paths": paths}
+
+    path = save_text_source(client, content, out_dir)
+    return {"saved": True, "mode": "text", "paths": [path]}
 
 
 def save_pdf_source(client: NotebookLMClient, content: dict, out_dir: Path) -> list[Path]:
@@ -367,33 +430,19 @@ def download_notebook(client: NotebookLMClient, notebook_id: str, out_base: Path
         print(f"    [{src_type}] {src_title} ... ", end="", flush=True)
 
         try:
-            content = client.get_source_content(src_id)
-        except NotebookLMError as e:
+            result = save_source(client, src, out_dir)
+        except (NotebookLMError, OSError) as e:
             print(f"FAIL ({e})")
             continue
 
-        if src_type in (
-            "pasted_text", "web_page", "markdown", "youtube", "media",
-            "powerpoint", "google_spreadsheet", "docx", "excel",
-            "google_drive", "gmail", "csv", "epub", "gemini_chat",
-            "ai_mode_chat", "expert_intelligence", "google_docs",
-            "google_slides", "unknown",
-        ):
-            save_text_source(client, content, out_dir)
-            print("OK")
-            src_ok += 1
-        elif src_type == "image":
-            paths = save_image_source(client, content, out_dir)
-            print(f"OK ({len(paths)} file)")
-            src_ok += 1
-        elif src_type == "pdf":
-            paths = save_pdf_source(client, content, out_dir)
-            print(f"OK ({len(paths)} pages)")
+        if result["saved"]:
+            detail = result["mode"]
+            if result["paths"]:
+                detail += f", {len(result['paths'])} file(s)"
+            print(f"OK ({detail})")
             src_ok += 1
         else:
-            save_text_source(client, content, out_dir)
-            print("OK (as text)")
-            src_ok += 1
+            print(f"FAIL ({result['mode']})")
 
     # --- アーティファクト ---
     artifacts = client.list_artifacts(notebook_id)
