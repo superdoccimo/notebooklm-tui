@@ -21,12 +21,12 @@ from pathlib import Path
 
 from notebooklm_client import BASE_URL, NotebookLMClient, NotebookLMError, AuthenticationError
 
-# テキストとして読み込んで add_source_text で追加する拡張子
-TEXT_EXTENSIONS = {".txt", ".md", ".csv", ".tsv", ".json", ".xml", ".html", ".htm"}
-
-# ファイルアップロード（resumable upload）に渡す拡張子。
-# Google の公開ヘルプにある形式に加え、過去に使われていた形式は best-effort として残す。
-DOCUMENT_UPLOAD_EXTENSIONS = {".pdf", ".docx", ".pptx", ".epub"}
+# Gemini Notebookがローカルファイルとして扱う形式。
+# .txt / .md / .csv も pasted text へ変換せず、原本ファイルとして送る。
+DOCUMENT_UPLOAD_EXTENSIONS = {
+    ".pdf", ".docx", ".pptx", ".epub",
+    ".txt", ".md", ".markdown", ".csv",
+}
 IMAGE_UPLOAD_EXTENSIONS = {
     ".avif", ".bmp", ".gif", ".heic", ".heif", ".ico", ".jp2", ".jpe",
     ".jpeg", ".jpg", ".png", ".tif", ".tiff", ".webp",
@@ -36,14 +36,20 @@ AUDIO_UPLOAD_EXTENSIONS = {
     ".avi", ".cda", ".m4a", ".mid", ".mp3", ".mp4", ".mpeg", ".ogg",
     ".opus", ".ra", ".ram", ".snd", ".wav", ".wma",
 }
-BEST_EFFORT_UPLOAD_EXTENSIONS = {
+
+# これらはファイルuploadせず、明示的な貼り付けテキストsourceとして追加する。
+PASTED_TEXT_EXTENSIONS = {".tsv", ".json", ".xml", ".html", ".htm"}
+
+# 過去にbest-effortとして通していたが、現在の公開サポート範囲に含めない。
+# サーバーへ投げて曖昧な失敗にせず、CLIで明確に拒否する。
+UNVERIFIED_UPLOAD_EXTENSIONS = {
     ".doc", ".ppt", ".xls", ".xlsx", ".flac", ".mov", ".mkv", ".webm",
 }
+
 UPLOAD_FILE_TYPES = (
     DOCUMENT_UPLOAD_EXTENSIONS
     | IMAGE_UPLOAD_EXTENSIONS
     | AUDIO_UPLOAD_EXTENSIONS
-    | BEST_EFFORT_UPLOAD_EXTENSIONS
 )
 
 
@@ -73,28 +79,34 @@ def upload_files(client: NotebookLMClient, notebook_id: str, files: list[Path]) 
         print(f"  {f.name} ... ", end="", flush=True)
 
         try:
-            if ext in TEXT_EXTENSIONS:
-                try:
-                    text = f.read_text(encoding="utf-8")
-                    source_id = client.add_source_text(notebook_id, f.name, text)
-                    success_label = "OK (as text)"
-                except UnicodeDecodeError:
-                    source_id = client.upload_file(notebook_id, f)
-                    success_label = "OK (as file)"
-                if source_id:
-                    print(success_label)
-                    ok += 1
-                else:
-                    print("FAIL")
-                    fail += 1
-            elif ext in UPLOAD_FILE_TYPES:
+            if ext in UPLOAD_FILE_TYPES:
                 source_id = client.upload_file(notebook_id, f)
                 if source_id:
-                    print("OK")
+                    print("OK (native file)")
                     ok += 1
                 else:
                     print("FAIL")
                     fail += 1
+            elif ext in PASTED_TEXT_EXTENSIONS:
+                try:
+                    text = f.read_text(encoding="utf-8")
+                except UnicodeDecodeError:
+                    print(f"SKIP (text fallback is not UTF-8: {ext})")
+                    fail += 1
+                    continue
+                source_id = client.add_source_text(notebook_id, f.name, text)
+                if source_id:
+                    print("OK (pasted text)")
+                    ok += 1
+                else:
+                    print("FAIL")
+                    fail += 1
+            elif ext in UNVERIFIED_UPLOAD_EXTENSIONS:
+                print(
+                    f"SKIP (not in the current documented upload set: {ext}; "
+                    "convert to a supported format first)"
+                )
+                fail += 1
             else:
                 print(f"SKIP (unsupported: {ext})")
                 fail += 1
@@ -287,7 +299,7 @@ def _restore_legacy_sources(
         print(f"  [legacy] {path.name} ... ", end="", flush=True)
         try:
             ext = path.suffix.lower()
-            if ext in TEXT_EXTENSIONS:
+            if ext in PASTED_TEXT_EXTENSIONS:
                 content = path.read_text(encoding="utf-8")
                 source_id = client.add_source_text(notebook_id, path.name, content)
                 restored_as = "text"
@@ -740,11 +752,11 @@ def print_supported_types():
     """対応ファイル形式を表示"""
     print("\n対応ファイル形式:")
     categories = {
-        "ドキュメント": sorted(DOCUMENT_UPLOAD_EXTENSIONS),
-        "テキスト/データ (貼り付けソース)": sorted(TEXT_EXTENSIONS),
+        "ネイティブ文書/テキスト/データ": sorted(DOCUMENT_UPLOAD_EXTENSIONS),
         "音声/文字起こし": sorted(AUDIO_UPLOAD_EXTENSIONS),
         "画像": sorted(IMAGE_UPLOAD_EXTENSIONS),
-        "互換目的のベストエフォート": sorted(BEST_EFFORT_UPLOAD_EXTENSIONS),
+        "貼り付けテキストとして追加": sorted(PASTED_TEXT_EXTENSIONS),
+        "標準では拒否（要変換）": sorted(UNVERIFIED_UPLOAD_EXTENSIONS),
     }
     for cat, exts in categories.items():
         print(f"  {cat}: {', '.join(exts)}")
