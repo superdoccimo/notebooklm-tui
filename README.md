@@ -30,6 +30,7 @@ A zero-dependency Python toolkit that backs up and restores Gemini Notebook (for
 - `nlm-tui`: Japanese UI terminal TUI
 - `nlm-tui-en`: English UI terminal TUI
 - `nlm-tui-curses`: Optional curses-based flicker-reduced TUI (experimental; may require extra setup on Windows)
+- `nlm-canary`: Live compatibility check for a real Gemini Notebook before release
 
 Core CLI tools and standard TUIs run on Python standard library only (no third-party packages required).
 On Windows/Python 3.14, prefer `nlm_tui.py` or `nlm_tui_en.py`. `nlm_tui_curses.py` may require extra setup on Windows (see below).
@@ -130,8 +131,39 @@ Optional install as commands:
 
 ```bash
 pip install .
-# provides: nlm-backup, nlm-upload, nlm-login, nlm-tui, nlm-tui-en, nlm-tui-curses
+# provides: nlm-backup, nlm-upload, nlm-login, nlm-tui, nlm-tui-en, nlm-tui-curses, nlm-canary
 ```
+
+
+## Release Canary
+
+Before publishing a release, run the live canary against a real notebook that contains representative Studio artifacts.
+
+```bash
+# Read-only: inventory whatever is present
+nlm-canary --notebook-id <notebook-id> --profile inventory
+
+# Release gate: require successful export of the current compatibility surface
+nlm-canary --notebook-id <notebook-id> --profile release
+```
+
+The `release` profile requires successful export of Audio Overview, Video Overview, Slide Deck, Report, Data Table, Flashcards, Quiz, Interactive Mind Map, Infographic, and an Interactive Learning Overview-shaped report payload. The canary writes local backup files plus `canary-report.json`; it does not modify the target notebook.
+
+For Short Video Overview specifically, prepare the release-canary notebook so its video artifact is a Short. The backup path is media-format agnostic, so the canary verifies that the actual video artifact can be exported even though the current list row does not expose a reliable human-readable short/explainer label.
+
+To verify current write/read wrappers separately:
+
+```bash
+# Explicitly destructive only to a notebook created by this command.
+# It creates one disposable notebook, adds a pasted-text source,
+# verifies readback + backup, and deletes that same notebook in finally.
+nlm-canary --write-smoke
+
+# Optional URL-source path as part of the same disposable smoke
+nlm-canary --write-smoke --smoke-url https://example.com
+```
+
+Exit code is `0` on pass, `2` on a completed canary with missing/failed coverage, `3` for authentication failure, and `1` for other errors. GitHub Release publication should remain a separate human-approved step after the live report passes.
 
 ## Usage: `nlm-backup` (Download)
 
