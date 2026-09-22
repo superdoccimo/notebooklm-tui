@@ -3,7 +3,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from nlm_backup import save_artifact, save_source
+from nlm_backup import build_backup_metadata, save_artifact, save_source
 from nlm_upload import restore_backup
 from notebooklm_client import NotebookLMClient
 
@@ -94,6 +94,26 @@ class CurrentWireRowTests(unittest.TestCase):
             ),
         )
 
+    def test_wait_for_source_ready_accepts_legacy_row_without_status_slot(self):
+        self.client.list_sources = lambda notebook_id: [
+            {
+                "id": "legacy-source",
+                "title": "Legacy",
+                "type": "pasted_text",
+                "status": "unknown",
+                "status_code": None,
+            }
+        ]
+
+        source = self.client.wait_for_source_ready(
+            "nb-legacy",
+            "legacy-source",
+            timeout=0.1,
+            interval=0.01,
+        )
+
+        self.assertEqual(source["id"], "legacy-source")
+
     def test_note_reader_accepts_current_outer_current_legacy_and_deleted_rows(self):
         mind_map_body = json.dumps(
             {"name": "Root", "children": [{"name": "Leaf"}]}
@@ -121,6 +141,22 @@ class CurrentWireRowTests(unittest.TestCase):
         self.assertEqual(mindmaps[0]["id"], "map-1")
         self.assertEqual(mindmaps[0]["title"], "Map Title")
         self.assertEqual(mindmaps[0]["data"]["children"][0]["name"], "Leaf")
+
+
+class BackupMetadataTests(unittest.TestCase):
+    def test_backup_metadata_declares_schema_v2_restore_boundaries(self):
+        meta = build_backup_metadata(
+            "nb-1",
+            "Title",
+            {"id": "nb-1", "title": "Title", "source_count": 3},
+        )
+
+        self.assertEqual(meta["backup_schema_version"], 2)
+        self.assertEqual(meta["source_count"], 3)
+        self.assertEqual(
+            meta["restore_semantics"]["studio_artifacts"],
+            "local backup only; not recreated from local files",
+        )
 
 
 class BackupEvidenceTests(unittest.TestCase):
