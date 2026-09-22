@@ -1,17 +1,20 @@
 # notebooklm-tui
 
-**NotebookLM には公式バックアップがありません。このツールですべてエクスポートできます。**
+**Gemini Notebook（旧 NotebookLM）にはワークスペース全体の公式バックアップがありません。このツールでノートブックデータをエクスポートできます。**
 
 > このツールが役に立ったら、ぜひスターをお願いします。
 
-NotebookLM のデータを丸ごとバックアップ＆リストアできる CLI/TUI ツールです。
+Gemini Notebook（旧 NotebookLM）のデータをバックアップ＆リストアできる CLI/TUI ツールです。
 
 - ソースをすべてダウンロード（PDF・テキスト・画像・URL）
-- 生成コンテンツをすべてエクスポート（音声・動画・スライド＋PPTX・レポート・インフォグラフィック・データテーブル・マインドマップ）
-- フラッシュカード・クイズを保存
+- 生成コンテンツをエクスポート（音声・動画・スライド＋PPTX・レポート・インフォグラフィック・データテーブル・マインドマップ）
+- 新しいQuiz形式にも耐えるschema-tolerantなフラッシュカード・クイズ保存
+- Studio artifactごとの生JSON snapshotを保存し、将来の形式追加でもpayloadを捨てない
 - ノートをバックアップ
 - ローカルバックアップからノートブックを復元
 - 外部Pythonパッケージ不要
+
+> **2026年9月互換対応:** GoogleはInteractive Learning Overviewsと、short answer / multiple select / fill in the blankなどの新しいQuiz形式を順次展開しています。既存のVideo Overview取得は形式に依存しないまま維持し、Quiz exporterは複数schemaを許容するよう拡張しました。さらに全Studio artifactの生payloadを `artifacts/_raw/` に保存します。raw snapshotは後から再解析するための保全データであり、まだ実payloadを観測していない新形式を完全に描画・復元できると保証するものではありません。
 
 - **nlm-login** — ブラウザから認証クッキーを自動取得（Edge/Chrome/Brave/Firefox対応）
 - **nlm-backup** — ソース・アーティファクト・ノートを一括ダウンロード
@@ -284,7 +287,8 @@ downloads/
     │       ├── page1.png
     │       ├── page2.png
     │       └── ...
-    ├── artifacts/             # NotebookLM が生成したもの
+    ├── artifacts/             # Gemini Notebook / NotebookLM が生成したもの
+    │   ├── _raw/               # 将来の再解析用 Studio payload snapshot
     │   ├── audio_overview.m4a
     │   ├── slide_deck.pdf
     │   ├── report.md
@@ -309,7 +313,9 @@ downloads/
 | Image | `.png` |
 | PDF | Page images (`.png` per page) |
 
-### Artifacts (NotebookLM が生成したもの)
+### Artifacts (Gemini Notebook / NotebookLM が生成したもの)
+
+すべてのStudio artifactについて `artifacts/_raw/` に生JSON snapshotも保存します。内部schemaが追加・変更されたときに、後からparserを更新して再解析するための保全データです。
 | Type | Format |
 |------|--------|
 | Audio Overview | `.m4a` |
