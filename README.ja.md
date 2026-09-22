@@ -222,6 +222,15 @@ nlm-upload --types
 
 backup schema v2では `sources/_metadata/`、`notes/_metadata/`、`mindmaps/_metadata/` にrestore用sidecarを保存します。期限付き・capability付きのdownload URLはsidecarへ保存しません。
 
+実際にNotebookを作る前に、ローカルだけでrestore計画を確認できます。
+
+```bash
+# Google認証不要、Notebook作成なし、ネットワークへのwriteなし
+nlm-upload --restore ./downloads/My_Notebook/ --dry-run
+```
+
+`restore-plan.json` を生成し、各項目が `restored` / `degraded` / `preserved_only` / preflight失敗のどれになるかを先に表示します。
+
 `nlm-upload --restore` は、元と同じ意味で戻せるものと、戻せないものを区別します。
 
 | Backup内容 | Restore動作 |
