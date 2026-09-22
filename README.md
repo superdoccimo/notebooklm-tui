@@ -338,7 +338,7 @@ Every Studio artifact also gets a raw JSON snapshot under `artifacts/_raw/`. Thi
 
 ## Architecture
 
-This project talks directly to Gemini Notebook / NotebookLM internal `batchexecute` endpoints. The default web host is `https://notebook.google.com`; `https://notebooklm.google.com` remains available as a legacy override via `NOTEBOOKLM_BASE_URL`.
+This project talks directly to Gemini Notebook / NotebookLM internal `batchexecute` endpoints. RPC/auth defaults to `https://notebook.google.com` and can be switched with `NOTEBOOKLM_BASE_URL`. File-upload session start stays on the live-observed consumer upload host `https://notebooklm.google.com` by default; `NOTEBOOKLM_UPLOAD_BASE_URL` can opt into `https://notebook.google.com` for account cohorts where that upload endpoint is known to work.
 
 ```text
 nlm_login.py            <- auth helper (Chromium via CDP / Firefox via cookies DB)
