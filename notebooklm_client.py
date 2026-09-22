@@ -29,7 +29,17 @@ if BASE_URL not in (DEFAULT_BASE_URL, LEGACY_BASE_URL):
         "or https://notebooklm.google.com"
     )
 BATCHEXECUTE_URL = f"{BASE_URL}/_/LabsTailwindUi/data/batchexecute"
-UPLOAD_URL = f"{BASE_URL}/upload/_/?authuser=0"
+
+# Keep the web upload data plane independent from the rebranded RPC host.
+# The legacy consumer upload host is the live-observed path; callers can opt
+# into the new host explicitly once their account cohort supports it.
+UPLOAD_BASE_URL = os.environ.get("NOTEBOOKLM_UPLOAD_BASE_URL", LEGACY_BASE_URL).rstrip("/")
+if UPLOAD_BASE_URL not in (DEFAULT_BASE_URL, LEGACY_BASE_URL):
+    raise ValueError(
+        "NOTEBOOKLM_UPLOAD_BASE_URL must be https://notebook.google.com "
+        "or https://notebooklm.google.com"
+    )
+UPLOAD_URL = f"{UPLOAD_BASE_URL}/upload/_/?authuser=0"
 DEFAULT_BUILD_LABEL = "boq_labs-tailwind-frontend_20260108.06_p0"
 BUILD_LABEL_PATTERN = re.compile(r"\bboq_[A-Za-z0-9_-]+_[0-9]{8}\.[0-9]+_p[0-9]+\b")
 
@@ -119,6 +129,19 @@ def _template_block() -> list:
         None,
         [1, None, None, None, None, None, None, None, None, None, [1]],
     ]
+
+
+def _trusted_upload_origin(url: str) -> str:
+    """Validate a server-named resumable upload URL and return its HTTPS origin."""
+    parsed = urllib.parse.urlsplit(url)
+    if parsed.scheme != "https" or parsed.hostname not in {
+        "notebook.google.com",
+        "notebooklm.google.com",
+    }:
+        raise NotebookLMError("Unexpected resumable upload URL origin")
+    if parsed.username or parsed.password:
+        raise NotebookLMError("Unexpected credentials in resumable upload URL")
+    return f"https://{parsed.netloc}"
 
 
 def _is_youtube_url(url: str) -> bool:
@@ -568,8 +591,8 @@ class NotebookLMClient:
         })
         headers = {
             "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8",
-            "Origin": BASE_URL,
-            "Referer": f"{BASE_URL}/",
+            "Origin": UPLOAD_BASE_URL,
+            "Referer": f"{UPLOAD_BASE_URL}/",
             "User-Agent": USER_AGENT,
             "x-goog-authuser": "0",
             "x-goog-upload-command": "start",
@@ -582,13 +605,14 @@ class NotebookLMClient:
         upload_url = resp.headers.get("x-goog-upload-url")
         if not upload_url:
             raise NotebookLMError("アップロードURLの取得に失敗しました")
+        upload_origin = _trusted_upload_origin(upload_url)
 
         # Step 3: ファイルバイナリを送信（ストリーミング）
         headers = {
             "Content-Type": "application/x-www-form-urlencoded;charset=utf-8",
             "Content-Length": str(file_size),
-            "Origin": BASE_URL,
-            "Referer": f"{BASE_URL}/",
+            "Origin": upload_origin,
+            "Referer": f"{upload_origin}/",
             "User-Agent": USER_AGENT,
             "x-goog-authuser": "0",
             "x-goog-upload-command": "upload, finalize",
