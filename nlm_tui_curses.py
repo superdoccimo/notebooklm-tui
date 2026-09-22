@@ -37,7 +37,7 @@ except (ImportError, ModuleNotFoundError) as exc:
     _CURSES_IMPORT_ERROR = exc
 
 from notebooklm_client import AuthenticationError, NotebookLMClient, NotebookLMError
-from nlm_backup import ARTIFACT_EXTENSIONS, format_timestamp, sanitize_filename, mindmap_to_markdown, save_artifact, save_source
+from nlm_backup import ARTIFACT_EXTENSIONS, format_timestamp, sanitize_filename, mindmap_to_markdown, save_artifact, save_source, save_note, save_mindmap, build_backup_metadata
 from nlm_upload import TEXT_EXTENSIONS, UPLOAD_FILE_TYPES, collect_files
 
 
@@ -376,11 +376,11 @@ def _backup_notebook(
     out_dir = out_base / safe_title
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    meta = {"id": notebook_id, "title": title}
-    for nb in notebooks:
-        if nb["id"] == notebook_id:
-            meta.update(nb)
-            break
+    notebook_record = next(
+        (nb for nb in notebooks if nb["id"] == notebook_id),
+        None,
+    )
+    meta = build_backup_metadata(notebook_id, title, notebook_record)
     with open(out_dir / "metadata.json", "w", encoding="utf-8") as f:
         json.dump(meta, f, ensure_ascii=False, indent=2)
 
@@ -434,7 +434,7 @@ def _backup_notebook(
         src_title = src.get("title", "untitled")
         if not src_id:
             src_fail += 1
-            failed_sources.append({"id": src_id, "type": src_type, "title": src_title})
+            failed_sources.append(src)
             step(f"Sources {i}/{len(sources)}: {src_title}")
             continue
         try:
@@ -443,10 +443,10 @@ def _backup_notebook(
                 src_ok += 1
             else:
                 src_fail += 1
-                failed_sources.append({"id": src_id, "type": src_type, "title": src_title})
+                failed_sources.append(src)
         except (NotebookLMError, OSError):
             src_fail += 1
-            failed_sources.append({"id": src_id, "type": src_type, "title": src_title})
+            failed_sources.append(src)
         step(f"Sources {i}/{len(sources)}: {src_title}")
 
     art_ok = 0
@@ -461,48 +461,29 @@ def _backup_notebook(
             failed_artifacts.append(art)
         step(f"Artifacts {i}/{len(artifacts)}: {art_title}")
 
-    note_dir = out_dir / "notes"
-    note_dir.mkdir(parents=True, exist_ok=True)
     note_ok = 0
     note_fail = 0
     for i, note in enumerate(notes, 1):
-        note_title = sanitize_filename(note.get("title", "untitled"))
-        content = note.get("content", "")
-        if not note_title.endswith(".md"):
-            note_title += ".md"
-        dest = _unique_path(note_dir / note_title)
+        note_title = note.get("title", "untitled")
         try:
-            with open(dest, "w", encoding="utf-8") as f:
-                f.write(content)
+            save_note(note, out_dir)
             note_ok += 1
         except OSError:
             note_fail += 1
-            failed_notes.append({"title": note.get("title", "untitled"), "content": content})
+            failed_notes.append(note)
         step(f"Notes {i}/{len(notes)}: {note_title}")
 
     mm_ok = 0
     mm_fail = 0
-    if mindmaps:
-        mm_dir = out_dir / "mindmaps"
-        mm_dir.mkdir(parents=True, exist_ok=True)
-        for i, mm in enumerate(mindmaps, 1):
-            mm_title = sanitize_filename(mm.get("title", "untitled"))
-            data = mm.get("data", {})
-            json_name = mm_title if mm_title.endswith(".json") else mm_title + ".json"
-            json_dest = _unique_path(mm_dir / json_name)
-            try:
-                with open(json_dest, "w", encoding="utf-8") as f:
-                    json.dump(data, f, ensure_ascii=False, indent=2)
-                md_name = Path(json_dest.stem).stem + ".md"
-                md_dest = _unique_path(mm_dir / md_name)
-                md_content = f"# {data.get('name', mm_title)}\n\n{mindmap_to_markdown(data)}\n"
-                with open(md_dest, "w", encoding="utf-8") as f:
-                    f.write(md_content)
-                mm_ok += 1
-            except OSError:
-                mm_fail += 1
-                failed_mindmaps.append(mm)
-            step(f"Mindmaps {i}/{len(mindmaps)}: {mm_title}")
+    for i, mm in enumerate(mindmaps, 1):
+        mm_title = mm.get("title", "untitled")
+        try:
+            save_mindmap(mm, out_dir)
+            mm_ok += 1
+        except OSError:
+            mm_fail += 1
+            failed_mindmaps.append(mm)
+        step(f"Mindmaps {i}/{len(mindmaps)}: {mm_title}")
 
     summary = {
         "sources_total": len(sources),
