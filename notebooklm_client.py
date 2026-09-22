@@ -11,6 +11,7 @@ Python 標準ライブラリのみで動作し、外部パッケージ依存は�
 import http.cookiejar
 import html as html_lib
 import json
+import mimetypes
 import os
 import re
 import ssl
@@ -108,6 +109,30 @@ class NotebookLMError(Exception):
 
 class AuthenticationError(NotebookLMError):
     pass
+
+
+def _template_block() -> list:
+    """Gemini Notebook current request-options wrapper."""
+    return [
+        2,
+        None,
+        None,
+        [1, None, None, None, None, None, None, None, None, None, [1]],
+    ]
+
+
+def _is_youtube_url(url: str) -> bool:
+    try:
+        host = (urllib.parse.urlparse(url.strip()).hostname or "").lower()
+    except ValueError:
+        return False
+    return host in {
+        "youtube.com",
+        "www.youtube.com",
+        "m.youtube.com",
+        "music.youtube.com",
+        "youtu.be",
+    }
 
 
 class NotebookLMClient:
@@ -366,10 +391,7 @@ class NotebookLMClient:
 
     def create_notebook(self, title: str) -> str:
         """ノートブックを作成してIDを返す"""
-        params = [
-            title, None, None, [2],
-            [1, None, None, None, None, None, None, None, None, None, [1]],
-        ]
+        params = [title, None, None, _template_block()]
         result = self._batchexecute("CCqFvf", params)
         if result and len(result) > 2:
             return result[2]
@@ -388,7 +410,7 @@ class NotebookLMClient:
         """ノートブック内のソース一覧を取得"""
         result = self._batchexecute(
             "rLM1Ne",
-            [notebook_id, None, [2], None, 0],
+            [notebook_id, None, _template_block(), None, 0],
             source_path=f"/notebook/{notebook_id}",
         )
         if not result or not isinstance(result[0], list) or len(result[0]) < 2:
@@ -474,12 +496,12 @@ class NotebookLMClient:
                 self._extract_text_recursive(item, parts)
 
     def add_source_url(self, notebook_id: str, url: str) -> str | None:
-        """URLソースを追加"""
-        source_data = [None, None, [url], None, None, None, None, None, None, None, 1]
-        params = [
-            [source_data], notebook_id, [2],
-            [1, None, None, None, None, None, None, None, None, None, [1]],
-        ]
+        """URL / YouTube ソースを追加"""
+        if _is_youtube_url(url):
+            source_data = [None, None, None, None, None, None, None, [url], None, None, 1]
+        else:
+            source_data = [None, None, [url], None, None, None, None, None, None, None, 1]
+        params = [[source_data], notebook_id, _template_block()]
         result = self._batchexecute("izAoDd", params, source_path=f"/notebook/{notebook_id}")
         try:
             return result[0][0][0][0]
@@ -489,10 +511,7 @@ class NotebookLMClient:
     def add_source_text(self, notebook_id: str, title: str, text: str) -> str | None:
         """テキストソースを追加"""
         source_data = [None, [title, text], None, 2, None, None, None, None, None, None, 1]
-        params = [
-            [source_data], notebook_id, [2],
-            [1, None, None, None, None, None, None, None, None, None, [1]],
-        ]
+        params = [[source_data], notebook_id, _template_block()]
         result = self._batchexecute("izAoDd", params, source_path=f"/notebook/{notebook_id}")
         try:
             return result[0][0][0][0]
@@ -507,12 +526,10 @@ class NotebookLMClient:
 
         filename = file_path.name
         file_size = file_path.stat().st_size
+        content_type = mimetypes.guess_type(filename)[0] or "application/octet-stream"
 
         # Step 1: ファイルソースを登録 → source_id 取得
-        params = [
-            [[filename]], notebook_id, [2],
-            [1, None, None, None, None, None, None, None, None, None, [1]],
-        ]
+        params = [[[filename]], notebook_id, _template_block()]
         result = self._batchexecute("o4cbdc", params, source_path=f"/notebook/{notebook_id}")
         source_id = self._extract_first_string(result)
         if not source_id:
@@ -532,6 +549,7 @@ class NotebookLMClient:
             "x-goog-authuser": "0",
             "x-goog-upload-command": "start",
             "x-goog-upload-header-content-length": str(file_size),
+            "x-goog-upload-header-content-type": content_type,
             "x-goog-upload-protocol": "resumable",
         }
         req = urllib.request.Request(UPLOAD_URL, data=upload_meta.encode("utf-8"), headers=headers, method="POST")
