@@ -1407,82 +1407,122 @@ class NotebookLMClient:
         self.update_note(notebook_id, note_id, content, title)
         return note_id
 
-    def list_notes(self, notebook_id: str) -> list[dict]:
-        """ノート一覧を取得"""
-        result = self._batchexecute(
-            "cFji9", [notebook_id],
-            source_path=f"/notebook/{notebook_id}",
+    @staticmethod
+    def _looks_like_note_row(item) -> bool:
+        if not isinstance(item, list) or not item:
+            return False
+        if isinstance(item[0], str):
+            return True
+        return (
+            item[0] is None
+            and len(item) > 1
+            and isinstance(item[1], list)
+            and bool(item[1])
+            and isinstance(item[1][0], str)
         )
-        if not result or not isinstance(result[0], list):
+
+    def _note_rows_from_result(self, result) -> list[list]:
+        """Normalize historical/current GET_NOTES response containers."""
+        if not isinstance(result, list) or not result:
             return []
 
+        direct = [item for item in result if self._looks_like_note_row(item)]
+        if direct:
+            return direct
+
+        first = result[0]
+        if isinstance(first, list):
+            return [item for item in first if self._looks_like_note_row(item)]
+        return []
+
+    def _decode_note_row(self, item: list) -> dict | None:
+        """Decode legacy, current and outer-current note wrappers."""
+        if not self._looks_like_note_row(item):
+            return None
+
+        # Current outer wrapper: [None, [id, content, metadata, None, title], ...]
+        if item[0] is None:
+            inner = item[1]
+            note_id = inner[0]
+            content = inner[1] if len(inner) > 1 and isinstance(inner[1], str) else ""
+            title = inner[4] if len(inner) > 4 and isinstance(inner[4], str) else ""
+            return {
+                "id": note_id,
+                "title": title or "Untitled",
+                "content": content,
+            }
+
+        note_id = item[0]
+        slot = item[1] if len(item) > 1 else None
+
+        # Soft-deleted row: [id, None, 2]
+        if slot is None and len(item) > 2 and item[2] == 2:
+            return None
+
+        # Legacy row: [id, content_string]
+        if isinstance(slot, str):
+            return {
+                "id": note_id,
+                "title": "Untitled",
+                "content": slot,
+            }
+
+        # Current normalized row: [id, [id, content, metadata, None, title]]
+        if isinstance(slot, list):
+            content = slot[1] if len(slot) > 1 and isinstance(slot[1], str) else ""
+            title = slot[4] if len(slot) > 4 and isinstance(slot[4], str) else ""
+            return {
+                "id": note_id,
+                "title": title or "Untitled",
+                "content": content,
+            }
+
+        return None
+
+    @staticmethod
+    def _mind_map_data(content: str) -> dict | None:
+        if not isinstance(content, str) or not content.lstrip().startswith("{"):
+            return None
+        try:
+            parsed = json.loads(content)
+        except (json.JSONDecodeError, TypeError):
+            return None
+        if isinstance(parsed, dict) and ("children" in parsed or "nodes" in parsed):
+            return parsed
+        return None
+
+    def _list_note_records(self, notebook_id: str) -> list[dict]:
+        result = self._batchexecute(
+            "cFji9",
+            [notebook_id],
+            source_path=f"/notebook/{notebook_id}",
+        )
+        records = []
+        for item in self._note_rows_from_result(result):
+            record = self._decode_note_row(item)
+            if record is not None:
+                records.append(record)
+        return records
+
+    def list_notes(self, notebook_id: str) -> list[dict]:
+        """ノート一覧を取得（mind map rowsは除外）"""
         notes = []
-        for item in result[0]:
-            try:
-                if not isinstance(item, list) or len(item) < 2:
-                    continue
-                note_id = item[0]
-                detail = item[1]
-                if detail is None:
-                    continue  # 削除済み
-
-                content = detail[1] if len(detail) > 1 else ""
-                title = detail[4] if len(detail) > 4 else ""
-
-                # マインドマップを除外（JSONコンテンツ）
-                if isinstance(content, str):
-                    try:
-                        parsed = json.loads(content)
-                        if isinstance(parsed, dict) and ("children" in parsed or "nodes" in parsed):
-                            continue
-                    except (json.JSONDecodeError, TypeError):
-                        pass
-
-                notes.append({
-                    "id": note_id,
-                    "title": title or "Untitled",
-                    "content": content or "",
-                })
-            except (IndexError, TypeError):
-                continue
+        for record in self._list_note_records(notebook_id):
+            if self._mind_map_data(record.get("content", "")) is None:
+                notes.append(record)
         return notes
 
     def list_mindmaps(self, notebook_id: str) -> list[dict]:
-        """ノート一覧からマインドマップだけを抽出"""
-        result = self._batchexecute(
-            "cFji9", [notebook_id],
-            source_path=f"/notebook/{notebook_id}",
-        )
-        if not result or not isinstance(result[0], list):
-            return []
-
+        """Note rowsからnote-backed mind mapを抽出"""
         mindmaps = []
-        for item in result[0]:
-            try:
-                if not isinstance(item, list) or len(item) < 2:
-                    continue
-                note_id = item[0]
-                detail = item[1]
-                if detail is None:
-                    continue
-
-                content = detail[1] if len(detail) > 1 else ""
-                title = detail[4] if len(detail) > 4 else ""
-
-                if isinstance(content, str):
-                    try:
-                        parsed = json.loads(content)
-                        if isinstance(parsed, dict) and ("children" in parsed or "nodes" in parsed):
-                            mindmaps.append({
-                                "id": note_id,
-                                "title": title or "Untitled",
-                                "content": content,
-                                "data": parsed,
-                            })
-                    except (json.JSONDecodeError, TypeError):
-                        pass
-            except (IndexError, TypeError):
+        for record in self._list_note_records(notebook_id):
+            parsed = self._mind_map_data(record.get("content", ""))
+            if parsed is None:
                 continue
+            mindmaps.append({
+                **record,
+                "data": parsed,
+            })
         return mindmaps
 
     # ------------------------------------------------------------------
