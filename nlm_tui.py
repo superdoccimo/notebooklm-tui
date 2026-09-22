@@ -49,6 +49,7 @@ from nlm_backup import (
     mindmap_to_markdown,
     save_mindmaps,
     save_artifact,
+    save_source,
 )
 from nlm_upload import TEXT_EXTENSIONS, UPLOAD_FILE_TYPES, collect_files
 
@@ -393,22 +394,12 @@ def _backup_notebook(
             step(f"Sources {i}/{len(sources)}: {src_title}")
             continue
         try:
-            content = client.get_source_content(src_id)
-            if src_type in (
-                "pasted_text", "web_page", "markdown", "youtube", "media",
-                "powerpoint", "google_spreadsheet", "docx", "excel",
-                "google_drive", "gmail", "csv", "epub", "gemini_chat",
-                "ai_mode_chat", "expert_intelligence", "google_docs",
-                "google_slides", "unknown",
-            ):
-                _save_text_source(content, out_dir)
-            elif src_type == "image":
-                _save_image_source(client, content, out_dir)
-            elif src_type == "pdf":
-                _save_pdf_source(client, content, out_dir)
+            result = save_source(client, src, out_dir)
+            if result["saved"]:
+                src_ok += 1
             else:
-                _save_text_source(content, out_dir)
-            src_ok += 1
+                src_fail += 1
+                failed_sources.append({"id": src_id, "type": src_type, "title": src_title})
         except (NotebookLMError, OSError):
             src_fail += 1
             failed_sources.append({"id": src_id, "type": src_type, "title": src_title})
