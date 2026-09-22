@@ -397,38 +397,42 @@ def save_artifacts(client: NotebookLMClient, artifacts: list[dict], out_dir: Pat
 # ノートの保存
 # ---------------------------------------------------------------------------
 
-def save_notes(notes: list[dict], out_dir: Path) -> int:
+def save_note(note: dict, out_dir: Path) -> Path:
+    """Save one native Note plus restore metadata."""
     note_dir = out_dir / "notes"
     note_dir.mkdir(parents=True, exist_ok=True)
     meta_dir = note_dir / "_metadata"
     meta_dir.mkdir(parents=True, exist_ok=True)
-    count = 0
 
+    title = sanitize_filename(note.get("title", "untitled"))
+    content = note.get("content", "")
+    if not title.endswith(".md"):
+        title += ".md"
+    dest = _unique_path(note_dir / title)
+    with open(dest, "w", encoding="utf-8") as f:
+        f.write(content)
+
+    note_meta = {
+        "schema_version": 1,
+        "id": note.get("id"),
+        "title": note.get("title", "Untitled"),
+        "file": str(dest.relative_to(note_dir)),
+    }
+    meta_name = sanitize_filename(str(note.get("id") or dest.stem)) + ".json"
+    with open(_unique_path(meta_dir / meta_name), "w", encoding="utf-8") as f:
+        json.dump(note_meta, f, ensure_ascii=False, indent=2)
+    return dest
+
+
+def save_notes(notes: list[dict], out_dir: Path) -> int:
+    count = 0
     for note in notes:
-        title = sanitize_filename(note.get("title", "untitled"))
-        content = note.get("content", "")
-        if not title.endswith(".md"):
-            title += ".md"
-        dest = note_dir / title
-        # 同名ファイルがある場合はナンバリング
-        if dest.exists():
-            i = 2
-            stem = Path(title).stem
-            while dest.exists():
-                dest = note_dir / f"{stem}_{i}.md"
-                i += 1
-        print(f"    {dest.name} ... ", end="", flush=True)
-        with open(dest, "w", encoding="utf-8") as f:
-            f.write(content)
-        note_meta = {
-            "schema_version": 1,
-            "id": note.get("id"),
-            "title": note.get("title", "Untitled"),
-            "file": str(dest.relative_to(note_dir)),
-        }
-        meta_name = sanitize_filename(str(note.get("id") or dest.stem)) + ".json"
-        with open(_unique_path(meta_dir / meta_name), "w", encoding="utf-8") as f:
-            json.dump(note_meta, f, ensure_ascii=False, indent=2)
+        print(f"    {note.get('title', 'untitled')} ... ", end="", flush=True)
+        try:
+            save_note(note, out_dir)
+        except OSError:
+            print("FAIL")
+            continue
         print("OK")
         count += 1
     return count
@@ -447,54 +451,75 @@ def mindmap_to_markdown(node: dict, indent: int = 0) -> str:
     return "\n".join(lines)
 
 
-def save_mindmaps(mindmaps: list[dict], out_dir: Path) -> int:
-    if not mindmaps:
-        return 0
+def save_mindmap(mm: dict, out_dir: Path) -> tuple[Path, Path]:
+    """Save one note-backed mind map as JSON + Markdown + restore metadata."""
     mm_dir = out_dir / "mindmaps"
     mm_dir.mkdir(parents=True, exist_ok=True)
     meta_dir = mm_dir / "_metadata"
     meta_dir.mkdir(parents=True, exist_ok=True)
+
+    title = sanitize_filename(mm.get("title", "untitled"))
+    data = mm.get("data", {})
+    json_name = title if title.endswith(".json") else title + ".json"
+    json_dest = _unique_path(mm_dir / json_name)
+    with open(json_dest, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+    md_name = Path(json_dest.stem).stem + ".md"
+    md_dest = _unique_path(mm_dir / md_name)
+    md_content = f"# {data.get('name', title)}\n\n{mindmap_to_markdown(data)}\n"
+    with open(md_dest, "w", encoding="utf-8") as f:
+        f.write(md_content)
+
+    mm_meta = {
+        "schema_version": 1,
+        "id": mm.get("id"),
+        "title": mm.get("title", "Untitled"),
+        "json_file": str(json_dest.relative_to(mm_dir)),
+        "markdown_file": str(md_dest.relative_to(mm_dir)),
+    }
+    meta_name = sanitize_filename(str(mm.get("id") or json_dest.stem)) + ".json"
+    with open(_unique_path(meta_dir / meta_name), "w", encoding="utf-8") as f:
+        json.dump(mm_meta, f, ensure_ascii=False, indent=2)
+    return json_dest, md_dest
+
+
+def save_mindmaps(mindmaps: list[dict], out_dir: Path) -> int:
+    if not mindmaps:
+        return 0
     count = 0
-
     for mm in mindmaps:
-        title = sanitize_filename(mm.get("title", "untitled"))
-        data = mm.get("data", {})
-
-        # JSON として保存
-        json_name = title if title.endswith(".json") else title + ".json"
-        json_dest = _unique_path(mm_dir / json_name)
-        print(f"    {json_dest.name} ... ", end="", flush=True)
+        print(f"    {mm.get('title', 'untitled')} ... ", end="", flush=True)
         try:
-            with open(json_dest, "w", encoding="utf-8") as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
-            print("OK")
+            save_mindmap(mm, out_dir)
         except OSError:
             print("FAIL")
             continue
-
-        # Markdown としても保存
-        md_name = Path(json_dest.stem).stem + ".md"
-        md_dest = _unique_path(mm_dir / md_name)
-        try:
-            md_content = f"# {data.get('name', title)}\n\n{mindmap_to_markdown(data)}\n"
-            with open(md_dest, "w", encoding="utf-8") as f:
-                f.write(md_content)
-        except OSError:
-            pass
-
-        mm_meta = {
-            "schema_version": 1,
-            "id": mm.get("id"),
-            "title": mm.get("title", "Untitled"),
-            "json_file": str(json_dest.relative_to(mm_dir)),
-            "markdown_file": str(md_dest.relative_to(mm_dir)),
-        }
-        meta_name = sanitize_filename(str(mm.get("id") or json_dest.stem)) + ".json"
-        with open(_unique_path(meta_dir / meta_name), "w", encoding="utf-8") as f:
-            json.dump(mm_meta, f, ensure_ascii=False, indent=2)
-
+        print("OK")
         count += 1
     return count
+
+
+def build_backup_metadata(
+    notebook_id: str,
+    title: str,
+    notebook_record: dict | None = None,
+) -> dict:
+    """Return the schema-v2 metadata shared by CLI and all TUI variants."""
+    meta = {
+        "id": notebook_id,
+        "title": title,
+        "backup_schema_version": 2,
+        "restore_semantics": {
+            "sources": "semantic when source sidecars are present",
+            "notes": "native notes",
+            "mindmaps": "note-backed JSON restore",
+            "studio_artifacts": "local backup only; not recreated from local files",
+        },
+    }
+    if notebook_record:
+        meta.update(notebook_record)
+    return meta
 
 
 # ---------------------------------------------------------------------------
@@ -531,22 +556,13 @@ def download_notebook(client: NotebookLMClient, notebook_id: str, out_base: Path
     print(f"{'='*60}")
 
     # --- メタデータ保存 ---
-    meta = {
-        "id": notebook_id,
-        "title": title,
-        "backup_schema_version": 2,
-        "restore_semantics": {
-            "sources": "semantic when source sidecars are present",
-            "notes": "native notes",
-            "mindmaps": "note-backed JSON restore",
-            "studio_artifacts": "local backup only; not recreated from local files",
-        },
-    }
+    notebook_record = None
     if notebooks:
-        for nb in notebooks:
-            if nb["id"] == notebook_id:
-                meta.update(nb)
-                break
+        notebook_record = next(
+            (nb for nb in notebooks if nb["id"] == notebook_id),
+            None,
+        )
+    meta = build_backup_metadata(notebook_id, title, notebook_record)
     with open(out_dir / "metadata.json", "w", encoding="utf-8") as f:
         json.dump(meta, f, ensure_ascii=False, indent=2)
 
