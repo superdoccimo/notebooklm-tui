@@ -665,7 +665,11 @@ class NotebookLMClient:
                     continue
                 last = source
                 status = source.get("status")
-                if status == "ready":
+                # Older cohorts omitted the status slot entirely. If the row is
+                # visible and there is no status code at all, preserve legacy
+                # behavior instead of timing out forever. An unknown *present*
+                # code remains non-terminal and will continue polling.
+                if status == "ready" or source.get("status_code") is None:
                     return source
                 if status in {"error", "pending_deletion"}:
                     raise NotebookLMError(
