@@ -141,6 +141,10 @@ def save_source(client: NotebookLMClient, source: dict, out_dir: Path) -> dict:
         dest.parent.mkdir(parents=True, exist_ok=True)
         if client.download_url(original_url, dest):
             return {"saved": True, "mode": "original", "paths": [dest]}
+        try:
+            dest.unlink(missing_ok=True)
+        except OSError:
+            pass
 
     content = client.get_source_content(source_id)
     source_type = source.get("type", "unknown")
@@ -231,6 +235,7 @@ def save_artifact(client: NotebookLMClient, artifact: dict, out_dir: Path) -> di
         "raw_snapshot": raw_snapshot,
         "dest": None,
         "pptx_saved": None,
+        "pptx_dest": None,
         "pages_count": None,
     }
 
@@ -244,6 +249,7 @@ def save_artifact(client: NotebookLMClient, artifact: dict, out_dir: Path) -> di
 
     if artifact.get("pptx_url"):
         pptx_dest = _unique_path(dest.with_suffix(".pptx"))
+        result["pptx_dest"] = pptx_dest
         result["pptx_saved"] = client.download_artifact_pptx(artifact, pptx_dest)
 
     if artifact.get("page_images"):
@@ -281,7 +287,7 @@ def save_artifacts(client: NotebookLMClient, artifacts: list[dict], out_dir: Pat
 
         if result["pptx_saved"] is not None:
             print(
-                f"    [{art_type}] → {dest.with_suffix('.pptx').name} ... "
+                f"    [{art_type}] → {result['pptx_dest'].name} ... "
                 f"{'OK' if result['pptx_saved'] else 'FAIL'}"
             )
 
