@@ -418,6 +418,8 @@ def _backup_notebook(
     src_ok = 0
     src_fail = 0
     for i, src in enumerate(sources, 1):
+        src = dict(src)
+        src["notebook_id"] = notebook_id
         src_id = src.get("id")
         src_type = src.get("type", "unknown")
         src_title = src.get("title", "untitled")
