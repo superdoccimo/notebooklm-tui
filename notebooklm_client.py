@@ -15,6 +15,7 @@ import mimetypes
 import os
 import re
 import ssl
+import time
 import urllib.parse
 import urllib.error
 import urllib.request
@@ -76,6 +77,20 @@ SOURCE_TYPES = {
     20: "expert_intelligence",
 }
 
+SOURCE_STATUS = {
+    0: "unknown",
+    1: "pending",
+    2: "ready",
+    3: "error",
+    4: "pending_deletion",
+    5: "preparing",
+}
+
+_TYPE_CODE_14_MIME_OVERRIDE = {
+    "application/pdf": 3,
+    "application/vnd.google-apps.spreadsheet": 7,
+}
+
 # Artifact type codes
 ARTIFACT_TYPES = {
     1: "audio_overview",
@@ -88,6 +103,7 @@ ARTIFACT_TYPES = {
     8: "slide_deck",
     9: "data_table",
     10: "file",
+    11: "guided_view",
 }
 
 ARTIFACT_STATUS = {
@@ -144,6 +160,46 @@ def _trusted_upload_origin(url: str) -> str:
     if not parsed.path.startswith("/upload/_/"):
         raise NotebookLMError("Unexpected resumable upload URL path")
     return f"https://{parsed.netloc}"
+
+
+def _normalized_mime(value: str | None) -> str | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    return value.split(";", 1)[0].strip().lower()
+
+
+def _disambiguate_source_type_code(
+    type_code: int | None,
+    content_mime: str | None,
+    drive_mime: str | None,
+) -> int | None:
+    """Refine the overloaded Drive code 14 using live-observed MIME evidence."""
+    if type_code != 14:
+        return type_code
+    for candidate in (content_mime, drive_mime):
+        normalized = _normalized_mime(candidate)
+        if normalized in _TYPE_CODE_14_MIME_OVERRIDE:
+            return _TYPE_CODE_14_MIME_OVERRIDE[normalized]
+    return type_code
+
+
+def _source_id_from_raw(raw_id) -> str | None:
+    """Decode regular and Drive-backed source-id envelopes."""
+    if isinstance(raw_id, str) and raw_id:
+        return raw_id
+    if not isinstance(raw_id, list) or not raw_id:
+        return None
+    if isinstance(raw_id[0], str) and raw_id[0]:
+        return raw_id[0]
+    if (
+        len(raw_id) >= 3
+        and raw_id[0] is None
+        and isinstance(raw_id[2], list)
+        and raw_id[2]
+        and isinstance(raw_id[2][0], str)
+    ):
+        return raw_id[2][0]
+    return None
 
 
 def _is_youtube_url(url: str) -> bool:
@@ -448,15 +504,22 @@ class NotebookLMClient:
         sources = []
         for src in raw_sources:
             try:
-                src_id = src[0][0] if isinstance(src[0], list) else src[0]
+                src_id = _source_id_from_raw(src[0])
+                if not src_id:
+                    continue
                 title = src[1] or "Untitled"
                 meta = src[2] if len(src) > 2 and isinstance(src[2], list) else []
 
-                # ソースタイプの判定
-                type_code = None
-                if meta and len(meta) > 4:
-                    type_code = meta[4]
-                source_type = SOURCE_TYPES.get(type_code, "unknown")
+                # Current source rows carry status at source[3][1].
+                status_code = None
+                if (
+                    len(src) > 3
+                    and isinstance(src[3], list)
+                    and len(src[3]) > 1
+                    and isinstance(src[3][1], int)
+                ):
+                    status_code = src[3][1]
+                status = SOURCE_STATUS.get(status_code, "unknown")
 
                 # URL（Web/YouTube source）
                 url = None
@@ -484,15 +547,38 @@ class NotebookLMClient:
                 ):
                     content_mime = src[7][2]
 
+                drive_mime = None
+                if len(meta) > 19 and isinstance(meta[19], str):
+                    drive_mime = meta[19]
+                elif (
+                    len(meta) > 9
+                    and isinstance(meta[9], list)
+                    and len(meta[9]) > 2
+                    and isinstance(meta[9][2], str)
+                ):
+                    drive_mime = meta[9][2]
+
+                type_code = meta[4] if len(meta) > 4 and isinstance(meta[4], int) else None
+                effective_type_code = _disambiguate_source_type_code(
+                    type_code,
+                    content_mime,
+                    drive_mime,
+                )
+                source_type = SOURCE_TYPES.get(effective_type_code, "unknown")
+
                 sources.append({
                     "id": src_id,
                     "title": title,
                     "type": source_type,
-                    "type_code": type_code,
+                    "type_code": effective_type_code,
+                    "raw_type_code": type_code,
+                    "status": status,
+                    "status_code": status_code,
                     "url": url,
                     "download_url": download_url,
                     "viewer_url": viewer_url,
                     "content_mime": content_mime,
+                    "drive_mime": drive_mime,
                     "_raw": src,
                 })
             except (IndexError, TypeError):
@@ -512,11 +598,38 @@ class NotebookLMClient:
         except (IndexError, TypeError):
             pass
 
-        # ソースタイプ
+        # ソースタイプ（Drive code 14 は MIME で補正）
         source_type = "unknown"
         try:
-            type_code = result[0][2][4]
-            source_type = SOURCE_TYPES.get(type_code, "unknown")
+            row = result[0]
+            meta = row[2] if len(row) > 2 and isinstance(row[2], list) else []
+            type_code = meta[4] if len(meta) > 4 and isinstance(meta[4], int) else None
+            content_mime = (
+                row[7][2]
+                if len(row) > 7
+                and isinstance(row[7], list)
+                and len(row[7]) > 2
+                and isinstance(row[7][2], str)
+                else None
+            )
+            drive_mime = (
+                meta[19]
+                if len(meta) > 19 and isinstance(meta[19], str)
+                else (
+                    meta[9][2]
+                    if len(meta) > 9
+                    and isinstance(meta[9], list)
+                    and len(meta[9]) > 2
+                    and isinstance(meta[9][2], str)
+                    else None
+                )
+            )
+            effective_type_code = _disambiguate_source_type_code(
+                type_code,
+                content_mime,
+                drive_mime,
+            )
+            source_type = SOURCE_TYPES.get(effective_type_code, "unknown")
         except (IndexError, TypeError):
             pass
 
@@ -535,6 +648,41 @@ class NotebookLMClient:
             "title": title,
             "source_type": source_type,
         }
+
+    def wait_for_source_ready(
+        self,
+        notebook_id: str,
+        source_id: str,
+        timeout: float = 120.0,
+        interval: float = 2.0,
+    ) -> dict:
+        """Poll a source until Gemini Notebook marks it ready or failed."""
+        deadline = time.monotonic() + timeout
+        last = None
+        while True:
+            for source in self.list_sources(notebook_id):
+                if source.get("id") != source_id:
+                    continue
+                last = source
+                status = source.get("status")
+                # Older cohorts omitted the status slot entirely. If the row is
+                # visible and there is no status code at all, preserve legacy
+                # behavior instead of timing out forever. An unknown *present*
+                # code remains non-terminal and will continue polling.
+                if status == "ready" or source.get("status_code") is None:
+                    return source
+                if status in {"error", "pending_deletion"}:
+                    raise NotebookLMError(
+                        f"ソース処理に失敗しました: {source.get('title', source_id)} "
+                        f"(status={status})"
+                    )
+                break
+            if time.monotonic() >= deadline:
+                status = last.get("status") if isinstance(last, dict) else "not-visible"
+                raise NotebookLMError(
+                    f"ソース準備がタイムアウトしました: {source_id} (status={status})"
+                )
+            time.sleep(max(0.1, interval))
 
     def _extract_text_recursive(self, data, parts: list):
         """ネストされた構造からテキスト文字列を再帰的に抽出"""
@@ -1193,6 +1341,26 @@ class NotebookLMClient:
         if "download_url" in artifact and artifact["download_url"]:
             return self.download_url(artifact["download_url"], dest_path)
 
+        # Known-but-not-yet-rendered artifact families are still preserved as
+        # a first-class JSON export instead of being reported as a total loss.
+        if artifact.get("type") in {"guided_view", "fantasy_map", "file", "mind_map"}:
+            with open(dest_path, "w", encoding="utf-8") as f:
+                json.dump(
+                    {
+                        "id": artifact.get("id"),
+                        "title": artifact.get("title"),
+                        "type": artifact.get("type"),
+                        "type_code": artifact.get("type_code"),
+                        "variant": artifact.get("variant"),
+                        "status": artifact.get("status"),
+                        "raw": artifact.get("_raw"),
+                    },
+                    f,
+                    ensure_ascii=False,
+                    indent=2,
+                )
+            return True
+
         return False
 
     def download_artifact_pptx(self, artifact: dict, dest_path: str | Path) -> bool:
@@ -1220,82 +1388,145 @@ class NotebookLMClient:
     # Notes
     # ------------------------------------------------------------------
 
-    def list_notes(self, notebook_id: str) -> list[dict]:
-        """ノート一覧を取得"""
-        result = self._batchexecute(
-            "cFji9", [notebook_id],
+    def update_note(self, notebook_id: str, note_id: str, content: str, title: str) -> bool:
+        """既存Noteの本文とタイトルを更新"""
+        params = [notebook_id, note_id, [[[content, title, [], 0]]]]
+        self._batchexecute(
+            "cYAfTb",
+            params,
             source_path=f"/notebook/{notebook_id}",
         )
-        if not result or not isinstance(result[0], list):
+        return True
+
+    def create_note(self, notebook_id: str, title: str, content: str = "") -> str:
+        """Note rowを作成し、本文とタイトルを確定してIDを返す"""
+        result = self._batchexecute(
+            "CYK0Xb",
+            [notebook_id, "", [1], None, title],
+            source_path=f"/notebook/{notebook_id}",
+        )
+        note_id = self._extract_first_string(result)
+        if not note_id:
+            raise NotebookLMError("Note作成に失敗しました")
+        self.update_note(notebook_id, note_id, content, title)
+        return note_id
+
+    @staticmethod
+    def _looks_like_note_row(item) -> bool:
+        if not isinstance(item, list) or not item:
+            return False
+        if isinstance(item[0], str):
+            return True
+        return (
+            item[0] is None
+            and len(item) > 1
+            and isinstance(item[1], list)
+            and bool(item[1])
+            and isinstance(item[1][0], str)
+        )
+
+    def _note_rows_from_result(self, result) -> list[list]:
+        """Normalize historical/current GET_NOTES response containers."""
+        if not isinstance(result, list) or not result:
             return []
 
+        direct = [item for item in result if self._looks_like_note_row(item)]
+        if direct:
+            return direct
+
+        first = result[0]
+        if isinstance(first, list):
+            return [item for item in first if self._looks_like_note_row(item)]
+        return []
+
+    def _decode_note_row(self, item: list) -> dict | None:
+        """Decode legacy, current and outer-current note wrappers."""
+        if not self._looks_like_note_row(item):
+            return None
+
+        # Current outer wrapper: [None, [id, content, metadata, None, title], ...]
+        if item[0] is None:
+            inner = item[1]
+            note_id = inner[0]
+            content = inner[1] if len(inner) > 1 and isinstance(inner[1], str) else ""
+            title = inner[4] if len(inner) > 4 and isinstance(inner[4], str) else ""
+            return {
+                "id": note_id,
+                "title": title or "Untitled",
+                "content": content,
+            }
+
+        note_id = item[0]
+        slot = item[1] if len(item) > 1 else None
+
+        # Soft-deleted row: [id, None, 2]
+        if slot is None and len(item) > 2 and item[2] == 2:
+            return None
+
+        # Legacy row: [id, content_string]
+        if isinstance(slot, str):
+            return {
+                "id": note_id,
+                "title": "Untitled",
+                "content": slot,
+            }
+
+        # Current normalized row: [id, [id, content, metadata, None, title]]
+        if isinstance(slot, list):
+            content = slot[1] if len(slot) > 1 and isinstance(slot[1], str) else ""
+            title = slot[4] if len(slot) > 4 and isinstance(slot[4], str) else ""
+            return {
+                "id": note_id,
+                "title": title or "Untitled",
+                "content": content,
+            }
+
+        return None
+
+    @staticmethod
+    def _mind_map_data(content: str) -> dict | None:
+        if not isinstance(content, str) or not content.lstrip().startswith("{"):
+            return None
+        try:
+            parsed = json.loads(content)
+        except (json.JSONDecodeError, TypeError):
+            return None
+        if isinstance(parsed, dict) and ("children" in parsed or "nodes" in parsed):
+            return parsed
+        return None
+
+    def _list_note_records(self, notebook_id: str) -> list[dict]:
+        result = self._batchexecute(
+            "cFji9",
+            [notebook_id],
+            source_path=f"/notebook/{notebook_id}",
+        )
+        records = []
+        for item in self._note_rows_from_result(result):
+            record = self._decode_note_row(item)
+            if record is not None:
+                records.append(record)
+        return records
+
+    def list_notes(self, notebook_id: str) -> list[dict]:
+        """ノート一覧を取得（mind map rowsは除外）"""
         notes = []
-        for item in result[0]:
-            try:
-                if not isinstance(item, list) or len(item) < 2:
-                    continue
-                note_id = item[0]
-                detail = item[1]
-                if detail is None:
-                    continue  # 削除済み
-
-                content = detail[1] if len(detail) > 1 else ""
-                title = detail[4] if len(detail) > 4 else ""
-
-                # マインドマップを除外（JSONコンテンツ）
-                if isinstance(content, str):
-                    try:
-                        parsed = json.loads(content)
-                        if isinstance(parsed, dict) and ("children" in parsed or "nodes" in parsed):
-                            continue
-                    except (json.JSONDecodeError, TypeError):
-                        pass
-
-                notes.append({
-                    "id": note_id,
-                    "title": title or "Untitled",
-                    "content": content or "",
-                })
-            except (IndexError, TypeError):
-                continue
+        for record in self._list_note_records(notebook_id):
+            if self._mind_map_data(record.get("content", "")) is None:
+                notes.append(record)
         return notes
 
     def list_mindmaps(self, notebook_id: str) -> list[dict]:
-        """ノート一覧からマインドマップだけを抽出"""
-        result = self._batchexecute(
-            "cFji9", [notebook_id],
-            source_path=f"/notebook/{notebook_id}",
-        )
-        if not result or not isinstance(result[0], list):
-            return []
-
+        """Note rowsからnote-backed mind mapを抽出"""
         mindmaps = []
-        for item in result[0]:
-            try:
-                if not isinstance(item, list) or len(item) < 2:
-                    continue
-                note_id = item[0]
-                detail = item[1]
-                if detail is None:
-                    continue
-
-                content = detail[1] if len(detail) > 1 else ""
-                title = detail[4] if len(detail) > 4 else ""
-
-                if isinstance(content, str):
-                    try:
-                        parsed = json.loads(content)
-                        if isinstance(parsed, dict) and ("children" in parsed or "nodes" in parsed):
-                            mindmaps.append({
-                                "id": note_id,
-                                "title": title or "Untitled",
-                                "content": content,
-                                "data": parsed,
-                            })
-                    except (json.JSONDecodeError, TypeError):
-                        pass
-            except (IndexError, TypeError):
+        for record in self._list_note_records(notebook_id):
+            parsed = self._mind_map_data(record.get("content", ""))
+            if parsed is None:
                 continue
+            mindmaps.append({
+                **record,
+                "data": parsed,
+            })
         return mindmaps
 
     # ------------------------------------------------------------------

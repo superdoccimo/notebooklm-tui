@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "nlm-backup"
 version = "1.1.0"
-description = "Gemini Notebook (NotebookLM) backup & restore tool - zero dependencies, pure Python"
+description = "Gemini Notebook (NotebookLM) backup & semantics-aware restore tool - zero dependencies, pure Python"
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.10"
