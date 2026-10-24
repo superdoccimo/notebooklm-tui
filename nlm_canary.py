@@ -65,12 +65,13 @@ def _artifact_labels(artifact: dict) -> set[str]:
     variant = artifact.get("variant")
 
     if art_type == "flashcards":
-        if variant in {"flashcards", "quiz", "interactive_mind_map"}:
+        if variant in {"flashcards", "quiz", "interactive_mind_map", "interactive_learning_overview"}:
             return {variant}
         return {"flashcards"}
 
-    if art_type == "report" and (
-        artifact.get("app_html")
+    if art_type in {"report", "guided_view"} and (
+        variant == "interactive_learning_overview"
+        or artifact.get("app_html")
         or artifact.get("structured_content") is not None
     ):
         return {"interactive_learning_overview"}
@@ -80,6 +81,12 @@ def _artifact_labels(artifact: dict) -> set[str]:
         labels.add(art_type)
     if isinstance(variant, str) and variant:
         labels.add(variant)
+    if art_type == "video_overview" and artifact.get("video_format"):
+        labels.add(f"video_overview:{artifact['video_format']}")
+    if art_type == "file" and artifact.get("file_extension"):
+        labels.add(f"file:{str(artifact['file_extension']).lstrip('.')}")
+    if artifact.get("co_creation_notes"):
+        labels.add("co_creation_notes")
     return labels
 
 
@@ -116,11 +123,22 @@ def _evaluate_artifact_coverage(
             )
 
     missing = sorted(required - successful_labels)
+    unknown_rows = [
+        {
+            "id": a.get("id"),
+            "title": a.get("title"),
+            "type": a.get("type"),
+            "type_code": a.get("type_code"),
+        }
+        for a in rows
+        if str(a.get("type") or "").startswith("unknown_")
+    ]
     return {
         "required": sorted(required),
         "successful_labels": sorted(successful_labels),
         "missing_required": missing,
         "failed_completed_exports": failed_exports,
+        "unknown_artifacts": unknown_rows,
         "passed": not missing and not failed_exports,
     }
 
@@ -203,9 +221,20 @@ def run_read_only_canary(
                     "status_code": artifact.get("status_code"),
                     "labels": sorted(_artifact_labels(artifact)),
                     "saved": bool(result.get("saved")),
+                    "review_saved": bool(result.get("review_saved")),
+                    "backup_mode": result.get("backup_mode"),
+                    "video_format": artifact.get("video_format"),
+                    "file_extension": artifact.get("file_extension"),
+                    "co_creation_notes_present": bool(artifact.get("co_creation_notes")),
+                    "referenced_artifact_ids": artifact.get("referenced_artifact_ids"),
                     "dest": (
                         str(Path(result["dest"]).relative_to(output_dir))
                         if result.get("dest")
+                        else None
+                    ),
+                    "review_dest": (
+                        str(Path(result["review_dest"]).relative_to(output_dir))
+                        if result.get("review_dest")
                         else None
                     ),
                     "raw_snapshot": str(

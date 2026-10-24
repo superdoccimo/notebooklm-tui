@@ -39,6 +39,7 @@ AUDIO_UPLOAD_EXTENSIONS = {
 
 # これらはファイルuploadせず、明示的な貼り付けテキストsourceとして追加する。
 PASTED_TEXT_EXTENSIONS = {".tsv", ".json", ".xml", ".html", ".htm"}
+TEXT_EXTENSIONS = PASTED_TEXT_EXTENSIONS
 
 # sidecarのない旧backupでは、.txt/.md/.csvが原本だったか抽出テキストだったか
 # 判別できない。従来どおりtext sourceとして戻し、DEGRADED扱いにする。
@@ -425,6 +426,16 @@ def _restore_mindmaps(
     return results
 
 
+RESTORE_SUPPORT_CATEGORIES = {
+    "fully_supported": "完全にバックアップ・復元可能",
+    "backup_only_no_server_restore": "バックアップ可能、元形式への復元不可",
+    "partial_data_only": "一部データのみ保存可能",
+    "raw_json_only": "raw JSONのみ保存可能",
+    "unverified_in_env": "利用環境で未確認",
+    "unsupported": "非対応",
+}
+
+
 def _artifact_preservation_summary(backup_dir: Path) -> dict:
     art_dir = backup_dir / "artifacts"
     if not art_dir.is_dir():
@@ -433,7 +444,39 @@ def _artifact_preservation_summary(backup_dir: Path) -> dict:
         path for path in art_dir.rglob("*")
         if path.is_file()
     ]
-    return {
+    meta_rows = _metadata_rows(art_dir)
+    items = []
+    counts_by_category = {
+        "backup_only_no_server_restore": 0,
+        "partial_data_only": 0,
+        "raw_json_only": 0,
+    }
+    unsupported_or_unknown = []
+    for row in meta_rows:
+        if row.get("_metadata_error"):
+            continue
+        cat = row.get("restore_category") or "backup_only_no_server_restore"
+        if cat in counts_by_category:
+            counts_by_category[cat] += 1
+        item_entry = {
+            "id": row.get("id"),
+            "title": row.get("title"),
+            "type": row.get("type"),
+            "variant": row.get("variant"),
+            "status": row.get("status"),
+            "official_support": bool(row.get("official_support", True)),
+            "backup_mode": row.get("backup_mode"),
+            "restore_category": cat,
+            "files": row.get("files", []),
+        }
+        for opt_k in ("video_format", "file_extension", "referenced_artifact_ids", "warning"):
+            if row.get(opt_k) is not None:
+                item_entry[opt_k] = row.get(opt_k)
+        items.append(item_entry)
+        if not item_entry["official_support"]:
+            unsupported_or_unknown.append(item_entry["title"] or item_entry["type"])
+
+    summary = {
         "preserved": bool(files),
         "file_count": len(files),
         "recreated": 0,
@@ -442,6 +485,12 @@ def _artifact_preservation_summary(backup_dir: Path) -> dict:
             "Re-generation would create new AI output rather than restore the original artifact."
         ),
     }
+    if items:
+        summary["items"] = items
+        summary["counts_by_category"] = counts_by_category
+    if unsupported_or_unknown:
+        summary["unofficial_raw_only_artifacts"] = unsupported_or_unknown
+    return summary
 
 
 def build_restore_plan(backup_dir: Path) -> dict:

@@ -14,7 +14,7 @@ Gemini Notebook（旧 NotebookLM）をバックアップし、サーバー側に
 - URL・原本ファイル・Native Note・note-backed Mind Mapを意味を保って復元し、fallback画像を別sourceへ勝手に変換しない
 - 外部Pythonパッケージ不要
 
-> **2026年9月互換対応:** 現在の `notebook.google.com` を既定hostにし、notebook作成/取得、URL・text source追加、file登録を現行request wrapperへ更新しました。Quizはshort answer / multiple select / fill in the blank等の複数schemaを許容し、Interactive Mind MapはMarkdown + JSONで保存します。CLI/TUI 3種は同じartifact exporterを使い、全Studio artifactの生payloadも `artifacts/_raw/` に保存します。Interactive Learning Overviewはartifact rowにHTML/structured payloadが現れた場合に保全しますが、まだ実payloadを観測していない形式の完全再現は保証しません。
+> **2026年10月 Gemini Notebook 互換対応:** `notebook.google.com`（および `notebooklm.google.com` 互換）、現行request wrapper、**Interactive Learning Overview**（埋め込みスライド・クイズ・フラッシュカード・マインドマップ・関連アーティファクトIDを含む `.md` + `.html` + `.json` 出力）、**Slide Deck / Video Overview 共同制作（Co-Creation）メタデータ**（`pending_review` 状態の Review outline notes / Review producer notes を `.review.md` + `.review.json` として保存）、**Video Overviews**（`explainer` / `short` / `cinematic` 識別とメタデータ）、**新しい生成ファイル形式（`type_code=10`）**（`PDF`, `DOCX`, `MD`, `TXT`, `XLSX`, `PPTX`, `CSV`, `JSON`, `PNG`, `JPG`, `GIF`, `SVG` の識別・保存および抽出テキストのバイナリ偽装防止）、拡張 **Quiz / Flashcards**、および `artifacts/_raw/`・`artifacts/_metadata/` における署名付きURL・認証情報の自動マスクに対応しています。
 
 - **nlm-login** — ブラウザから認証クッキーを自動取得（Edge/Chrome/Brave/Firefox対応）
 - **nlm-backup** — ソース・アーティファクト・ノートを一括ダウンロード
@@ -391,18 +391,47 @@ downloads/
 
 ### Artifacts (Gemini Notebook / NotebookLM が生成したもの)
 
-すべてのStudio artifactについて `artifacts/_raw/` に生JSON snapshotも保存します。内部schemaが追加・変更されたときに、後からparserを更新して再解析するための保全データです。
-| Type | Format |
-|------|--------|
-| Audio Overview | `.m4a` |
-| Video Overview | `.mp4` |
-| Slide Deck | `.pdf` + 利用可能な場合は `.pptx` |
-| Report | `.md` |
-| Data Table | `.csv` |
-| Flashcards | `.md` + `.html` + `.json` |
-| Quiz | `.md` + `.html` + `.json` |
-| Interactive Mind Map | `.md` + `.json` |
-| Infographic | `.png` |
+すべてのStudio artifactについて、`artifacts/_metadata/` にrestore-safeなメタデータsidecarを、`artifacts/_raw/` に署名付きURLや認証トークンをマスクした生JSON snapshotを保存します。
+
+| Type | Format | バックアップ・復元区分 |
+|------|--------|------------------------|
+| Audio Overview | `.m4a` | バックアップ可能、元形式への復元不可 |
+| Video Overview (`explainer` / `short` / `cinematic`) | `.mp4` + 形式/言語/演出メタデータ | バックアップ可能、元形式への復元不可 |
+| Slide Deck | `.pdf` + 利用可能な場合は `.pptx` + 各ページ `.png` | バックアップ可能、元形式への復元不可 |
+| 共同制作レビュー状態 (`pending_review` の Slide Deck / Video) | `.review.md` + `.review.json`（outline / producer notes、プロンプト、修正指示） | 一部データのみ保存可能（`Proceed` 前の構成確認情報） |
+| Interactive Learning Overview | `.md` + `.html` + `.json`（セクション、埋め込みスライド/クイズ/カード、関連artifact ID） | バックアップ可能、元形式への復元不可 |
+| Report | `.md` | バックアップ可能、元形式への復元不可 |
+| Data Table | `.csv` | バックアップ可能、元形式への復元不可 |
+| Flashcards | `.md` + `.html` + `.json` | バックアップ可能、元形式への復元不可 |
+| Quiz（単一選択・複数選択・短答式・穴埋め式） | `.md` + `.html` + `.json` | バックアップ可能、元形式への復元不可 |
+| Interactive Mind Map | `.md` + `.json` | バックアップ可能、元形式への復元不可 |
+| Infographic | `.png` | バックアップ可能、元形式への復元不可 |
+| 生成ファイル (`type_code=10`: `PDF`, `DOCX`, `MD`, `TXT`, `XLSX`, `PPTX`, `CSV`, `JSON`, `PNG`, `JPG`, `GIF`, `SVG`) | 実体取得時は元拡張子で保存。バイナリ実体不在時は `.extracted.txt` に分離 | バックアップ可能、元形式への復元不可（抽出テキストを元バイナリと偽らない） |
+| 未知のStudio成果物 (`unknown_*`, `fantasy_map`) | 認証情報を除いた `artifacts/_raw/` JSON + `official_support: false` | raw JSONのみ保存可能 |
+
+### 2026年10月時点 バックアップ・復元対応区分表（6区分）
+
+「ローカルに保存できること」と「Google側に元どおり復元できること」を厳密に分け、以下の6区分で管理・表示します。
+
+| 区分 | 定義 | 対象データ |
+|------|------|------------|
+| **1. 完全にバックアップ・復元可能** (`fully_supported`) | ローカル保存でき、Gemini Notebook 側へ元の意味を保ったまま復元可能 | Web / YouTube URLソース、原本ファイルを取得できたソース（`PDF`, `DOCX`, `PPTX`, `EPUB`, `TXT`, `MD`, `CSV`, 画像, 音声）、貼り付けテキスト/Markdownソース、Native Note、note-backed Mind Map |
+| **2. バックアップ可能、元形式への復元不可** (`backup_only_no_server_restore`) | 意味のある形式（バイナリ原本または `.md`+`.html`+`.json`）で保存可能だが、**再生成は別出力になるため復元時に再生成しない** | 完成済み Studio 成果物（Audio Overview、Video Overview `explainer`/`short`/`cinematic`、Slide Deck `.pdf`/`.pptx`、Interactive Learning Overview、Report、Quiz、Flashcards、Interactive Mind Map、Data Table、Infographic、実体取得済み生成ファイル）、ページ画像のみ取得できたPDF |
+| **3. 一部データのみ保存可能** (`partial_data_only`) | 原本バイナリや完成前成果物のうち、抽出テキスト・レンダリング画像・レビュー構成案のみ保存可能 | 原本バイナリが非公開で抽出テキスト/レンダリング画像のみ取得できたソース（復元時は `DEGRADED` と明記）、`pending_review` 状態の Slide Deck / Video Overview（`.review.md` + `.review.json`）、バイナリ実体が取得できず抽出テキストのみ分離保存した生成ファイル（`.extracted.txt`） |
+| **4. raw JSONのみ保存可能** (`raw_json_only`) | 認証情報を除いた生JSON構造のみを `artifacts/_raw/` に保全し、正式未対応（`official_support: false`）として記録 | 未知の `unknown_*` Studio アーティファクト、`fantasy_map`、レビュー情報を持たない `pending`/`in_progress` 状態のアーティファクト |
+| **5. 利用環境で未確認** (`unverified_in_env`) | 自動テスト・フィクスチャで検証済みだが、アカウント・プラン（AI Ultra等）・地域・Cookie期限により実機レスポンス未採取 | 2026年10月19日公開の共同制作（Review outline notes / Review producer notes）の実機RPC行、Cinematic Video Overview、クラウドコンピュータコード実行による生成ファイル（`type_code=10`）の実機取得 |
+| **6. 非対応** (`unsupported`) | ノートブックの永続データとしてエクスポート不可、またはツールのスコープ外 | リアルタイム音声対話セッション自体、共同制作の `Proceed` 実行やレビュー指示送信の自動操作RPC、ノートブックへインポートされていない Gemini アプリ側のチャット履歴 |
+
+## 変更履歴 (Changelog)
+
+### v1.2.0-dev (2026-10)
+- **P0 修正**: `nlm_tui.py` / `nlm_tui_en.py` / `nlm_tui_curses.py` が `TEXT_EXTENSIONS` のimportエラーで起動不能になっていた問題を修正し、TUIからのファイルアップロード判定を `nlm_upload.py` と統一。
+- **P0 修正**: `nlm_login.py` の Firefox 起動URL・SQLite 抽出条件・CDP タブ検出を `notebook.google.com` / `notebooklm.google.com` 両対応に統一。
+- **P0 セキュリティ**: `artifacts/_raw/` および `artifacts/_metadata/` 保存時に `googleusercontent.com` 等の署名付きURL・クエリトークン・Cookie文字列を自動マスクする `sanitize_for_backup` を追加。
+- **P1 Interactive Learning Overview**: `type_code=2`（HTML/構造化データ付きレポート）および `type_code=11`（`guided_view`）を `.md` + `.html` + `.json` として意味のある構造（セクション、埋め込みスライド・クイズ・フラッシュカード・マインドマップ、引用、関連アーティファクトID）で保存。
+- **P1 共同制作（Co-Creation）メタデータ**: Slide Deck の Review outline notes および Video Overview の Review producer notes・プロンプト・修正指示を抽出し、`pending_review`（`status_code=6`）でも `.review.md` + `.review.json` として保存。
+- **P2 生成ファイル形式（`type_code=10`）**: `PDF`, `DOCX`, `MD`, `TXT`, `XLSX`, `PPTX`, `CSV`, `JSON`, `PNG`, `JPG`, `GIF`, `SVG` の識別・保存に対応し、バイナリ実体未取得時に抽出テキストを元ファイルと偽装しないガードを実装。
+- **P2 Quiz / Flashcards / Video Overviews**: Video Overview の `explainer` / `short` / `cinematic` 識別、クイズ・カードの画像URL・学習トピック・採点フィードバック表示、`nlm-canary` と `build_restore_plan` の拡張。
 
 ### Notes
 | Type | Format |

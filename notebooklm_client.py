@@ -122,7 +122,141 @@ APP_ARTIFACT_TYPES = {
     2: "quiz",
     3: "prototype",
     4: "interactive_mind_map",
+    5: "interactive_learning_overview",
 }
+
+VIDEO_OVERVIEW_STYLES = {
+    1: "explainer",
+    2: "short",
+    3: "cinematic",
+}
+
+GENERATED_FILE_MIME_EXTENSIONS = {
+    "application/pdf": ".pdf",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document": ".docx",
+    "text/markdown": ".md",
+    "text/x-markdown": ".md",
+    "text/plain": ".txt",
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": ".xlsx",
+    "application/vnd.openxmlformats-officedocument.presentationml.presentation": ".pptx",
+    "text/csv": ".csv",
+    "application/csv": ".csv",
+    "application/json": ".json",
+    "text/json": ".json",
+    "image/png": ".png",
+    "image/jpeg": ".jpg",
+    "image/jpg": ".jpg",
+    "image/gif": ".gif",
+    "image/svg+xml": ".svg",
+}
+
+SUPPORTED_GENERATED_FILE_EXTENSIONS = {
+    ".pdf",
+    ".docx",
+    ".md",
+    ".markdown",
+    ".txt",
+    ".xlsx",
+    ".pptx",
+    ".csv",
+    ".json",
+    ".png",
+    ".jpg",
+    ".jpeg",
+    ".gif",
+    ".svg",
+}
+
+BINARY_GENERATED_FILE_EXTENSIONS = {
+    ".pdf",
+    ".docx",
+    ".xlsx",
+    ".pptx",
+    ".png",
+    ".jpg",
+    ".jpeg",
+    ".gif",
+}
+
+TEXT_GENERATED_FILE_EXTENSIONS = {
+    ".md",
+    ".markdown",
+    ".txt",
+    ".csv",
+    ".json",
+    ".svg",
+}
+
+_SENSITIVE_QUERY_KEYS = frozenset({
+    "key",
+    "token",
+    "access_token",
+    "auth",
+    "sig",
+    "signature",
+    "x-goog-signature",
+    "x-goog-credential",
+    "x-goog-security-token",
+    "sid",
+    "session",
+    "cookie",
+})
+
+_SENSITIVE_DICT_KEYS = frozenset({
+    "cookies",
+    "cookie",
+    "csrf_token",
+    "session_id",
+    "authorization",
+    "x-goog-authuser",
+})
+
+_CREDENTIAL_STRING_PATTERN = re.compile(
+    r"(?:^|[;\s])(?:SAPISID|APISID|HSID|SSID|SID|__Secure-1PSID|__Secure-3PSID|__Secure-1PAPISID|__Secure-3PAPISID)=[^\s;]+",
+    re.IGNORECASE,
+)
+
+
+def sanitize_for_backup(value):
+    """Redact signed capability URLs, auth query tokens, and cookies from raw backup payloads."""
+    if isinstance(value, str):
+        stripped = value.strip()
+        if stripped.startswith(("http://", "https://")):
+            try:
+                parsed = urllib.parse.urlsplit(stripped)
+                host = (parsed.hostname or "").lower()
+                if host == "googleusercontent.com" or host.endswith(".googleusercontent.com") or host.endswith(".usercontent.google.com"):
+                    return f"{parsed.scheme}://{parsed.netloc}/[REDACTED_SIGNED_URL]"
+                if parsed.query:
+                    q_items = urllib.parse.parse_qsl(parsed.query, keep_blank_values=True)
+                    redacted_any = False
+                    new_items = []
+                    for k, v in q_items:
+                        if k.lower() in _SENSITIVE_QUERY_KEYS:
+                            new_items.append((k, "[REDACTED]"))
+                            redacted_any = True
+                        else:
+                            new_items.append((k, v))
+                    if redacted_any:
+                        new_query = urllib.parse.urlencode(new_items)
+                        return urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, parsed.path, new_query, parsed.fragment))
+            except ValueError:
+                pass
+        if _CREDENTIAL_STRING_PATTERN.search(value):
+            return _CREDENTIAL_STRING_PATTERN.sub(" [REDACTED_CREDENTIAL]", value).strip()
+        return value
+    if isinstance(value, list):
+        return [sanitize_for_backup(item) for item in value]
+    if isinstance(value, dict):
+        sanitized = {}
+        for k, v in value.items():
+            key_lower = str(k).lower()
+            if key_lower in _SENSITIVE_DICT_KEYS:
+                sanitized[k] = "[REDACTED]"
+            else:
+                sanitized[k] = sanitize_for_backup(v)
+        return sanitized
+    return value
 
 APP_ARTIFACT_DATA_PATTERN = re.compile(
     r"<app-root\b[^>]*\bdata-app-data=\"(.*?)\"",
@@ -794,11 +928,34 @@ class NotebookLMClient:
         return None
 
     def _artifact_variant_from_raw(self, art: list) -> str | None:
-        """type 4 アーティファクトのサブタイプを返す"""
+        """type 4 / 2 / 11 アーティファクトのサブタイプを返す"""
         try:
-            return APP_ARTIFACT_TYPES.get(art[9][1][0])
+            type_code = art[2]
         except (IndexError, TypeError):
-            return None
+            type_code = None
+
+        if type_code == 4:
+            try:
+                return APP_ARTIFACT_TYPES.get(art[9][1][0])
+            except (IndexError, TypeError):
+                return None
+
+        if type_code == 11:
+            return "interactive_learning_overview"
+
+        if type_code == 2:
+            try:
+                report_container = art[7] if len(art) > 7 else None
+                payload = report_container[0] if isinstance(report_container, list) and report_container else report_container
+                if isinstance(payload, str):
+                    lowered = payload.lstrip().lower()
+                    if "<html" in lowered or "<app-root" in lowered:
+                        return "interactive_learning_overview"
+                elif isinstance(payload, (dict, list)) and payload:
+                    return "interactive_learning_overview"
+            except (IndexError, TypeError):
+                pass
+        return None
 
     def _build_artifact_record(self, art: list) -> dict | None:
         """生アーティファクト配列を共通 dict 形式へ変換"""
@@ -813,7 +970,9 @@ class NotebookLMClient:
         art_type = ARTIFACT_TYPES.get(type_code, f"unknown_{type_code}")
         status = ARTIFACT_STATUS.get(status_code, "unknown")
         variant = self._artifact_variant_from_raw(art)
-        download_info = self._extract_artifact_download(art, type_code)
+        download_info = self._extract_artifact_download(art, type_code, title=title)
+        if not variant and download_info.get("variant"):
+            variant = download_info["variant"]
 
         return {
             "id": art_id,
@@ -828,7 +987,7 @@ class NotebookLMClient:
         }
 
     def _extract_app_artifact_data(self, html_content: str) -> dict | None:
-        """type 4 HTML から app-root の JSON データを抽出"""
+        """HTML から app-root の JSON データを抽出"""
         match = APP_ARTIFACT_DATA_PATTERN.search(html_content)
         if not match:
             return None
@@ -854,16 +1013,100 @@ class NotebookLMClient:
         return parsed if isinstance(parsed, dict) else None
 
     def _artifact_variant_from_data(self, artifact: dict, app_data: dict | None) -> str:
-        """詳細 HTML から得たデータを含めて type 4 の種別を判定"""
+        """詳細 HTML / structured payload から得たデータを含めて種別を判定"""
         variant = artifact.get("variant")
         if variant:
             return variant
         if isinstance(app_data, dict):
-            if "flashcards" in app_data:
-                return "flashcards"
-            if "quiz" in app_data:
+            # If the payload has learning overview sections/modules or mixes slides/sections with quiz/flashcards
+            if any(
+                k in app_data
+                for k in (
+                    "sections",
+                    "modules",
+                    "lessons",
+                    "learningOverview",
+                    "interactiveLearningOverview",
+                    "overview",
+                    "relatedArtifacts",
+                    "embeddedArtifacts",
+                    "slides",
+                )
+            ):
+                return "interactive_learning_overview"
+            if "flashcards" in app_data or "cards" in app_data:
+                if "quiz" not in app_data and "questions" not in app_data:
+                    return "flashcards"
+                return "interactive_learning_overview"
+            if "quiz" in app_data or "questions" in app_data:
                 return "quiz"
+        if artifact.get("type") in {"report", "guided_view"} and (
+            artifact.get("app_html") or artifact.get("structured_content") is not None
+        ):
+            return "interactive_learning_overview"
         return artifact.get("type", "flashcards")
+
+    def _extract_referenced_artifact_ids(self, data) -> list[str]:
+        """Interactive Learning Overview 等の payload から関連アーティファクトIDを抽出"""
+        refs: list[str] = []
+        seen: set[str] = set()
+        id_keys = {
+            "artifactid",
+            "artifact_id",
+            "relatedartifactid",
+            "related_artifact_id",
+            "slidedeckid",
+            "slide_deck_id",
+            "quizid",
+            "quiz_id",
+            "flashcardsid",
+            "flashcards_id",
+            "mindmapid",
+            "mind_map_id",
+            "videoid",
+            "video_id",
+            "audioid",
+            "audio_id",
+        }
+        list_keys = {
+            "artifactids",
+            "artifact_ids",
+            "relatedartifactids",
+            "related_artifact_ids",
+            "relatedartifacts",
+            "related_artifacts",
+            "embeddedartifacts",
+            "embedded_artifacts",
+        }
+
+        def add_ref(val):
+            if isinstance(val, str):
+                cleaned = val.strip()
+                if cleaned and cleaned not in seen and not cleaned.startswith(("http://", "https://")):
+                    seen.add(cleaned)
+                    refs.append(cleaned)
+
+        def walk(node):
+            if isinstance(node, dict):
+                for k, v in node.items():
+                    kl = str(k).lower()
+                    if kl in id_keys:
+                        add_ref(v)
+                    elif kl in list_keys and isinstance(v, list):
+                        for item in v:
+                            if isinstance(item, str):
+                                add_ref(item)
+                            elif isinstance(item, dict):
+                                add_ref(item.get("id") or item.get("artifactId") or item.get("artifact_id"))
+                                walk(item)
+                    else:
+                        walk(v)
+            elif isinstance(node, list):
+                for item in node:
+                    walk(item)
+
+        walk(data)
+        return refs
 
     def _normalize_artifact_text(self, value) -> str:
         if value is None:
@@ -877,7 +1120,7 @@ class NotebookLMClient:
                 continue
             value = item.get(key)
             if isinstance(value, dict):
-                for nested_key in ("text", "value", "answer", "label"):
+                for nested_key in ("text", "value", "answer", "label", "title", "content"):
                     text = self._normalize_artifact_text(value.get(nested_key))
                     if text:
                         return text
@@ -889,10 +1132,28 @@ class NotebookLMClient:
 
     def _quiz_question_format(self, item: dict) -> str:
         """新旧 Quiz schema の形式名を best-effort で抽出"""
-        return self._first_artifact_text(
+        explicit = self._first_artifact_text(
             item,
             ("questionType", "question_type", "format", "kind", "type"),
         )
+        if explicit:
+            return explicit
+        options = self._quiz_options(item)
+        if options:
+            correct_count = sum(
+                1
+                for opt in options
+                if isinstance(opt, dict) and (opt.get("isCorrect") is True or opt.get("correct") is True)
+            )
+            if correct_count > 1 or item.get("multiSelect") is True or item.get("allowMultiple") is True:
+                return "multiple_select"
+            return "single_choice"
+        question_text = self._first_artifact_text(item, ("question", "prompt", "stem"))
+        if "___" in question_text or "blank" in str(item.get("blank", "")).lower():
+            return "fill_in_the_blank"
+        if self._quiz_correct_answers(item, []):
+            return "short_answer"
+        return ""
 
     def _quiz_options(self, item: dict) -> list[dict]:
         """answerOptions/options/choices の違いを吸収して正規化"""
@@ -926,6 +1187,7 @@ class NotebookLMClient:
             "acceptedAnswers",
             "expectedAnswers",
             "answers",
+            "blanks",
         ):
             value = item.get(key)
             if not isinstance(value, list):
@@ -934,7 +1196,7 @@ class NotebookLMClient:
                 if isinstance(answer, dict):
                     text = self._first_artifact_text(
                         answer,
-                        ("text", "value", "answer", "label"),
+                        ("text", "value", "answer", "label", "acceptedAnswer"),
                     )
                 else:
                     text = self._normalize_artifact_text(answer)
@@ -947,6 +1209,7 @@ class NotebookLMClient:
             "expectedAnswer",
             "answer",
             "solution",
+            "blankAnswer",
         ):
             if key not in item:
                 continue
@@ -984,12 +1247,37 @@ class NotebookLMClient:
             deduped.append(answer)
         return deduped
 
+    def _extract_item_image_urls(self, item: dict) -> list[str]:
+        urls = []
+        for key in ("imageUrls", "image_urls", "images"):
+            val = item.get(key)
+            if isinstance(val, list):
+                for entry in val:
+                    if isinstance(entry, str) and entry.strip():
+                        urls.append(entry.strip())
+                    elif isinstance(entry, dict):
+                        u = self._first_artifact_text(entry, ("url", "src", "imageUrl", "image_url"))
+                        if u:
+                            urls.append(u)
+        for key in ("imageUrl", "image_url", "image", "frontImageUrl", "backImageUrl"):
+            val = item.get(key)
+            if isinstance(val, str) and val.strip():
+                urls.append(val.strip())
+        deduped = []
+        seen = set()
+        for u in urls:
+            if u not in seen:
+                seen.add(u)
+                deduped.append(u)
+        return deduped
+
     def _render_flashcards_markdown(
         self,
         title: str,
         cards: list[dict],
         html_name: str,
         json_name: str,
+        app_data: dict | None = None,
     ) -> str:
         lines = [
             f"# {title}",
@@ -999,9 +1287,16 @@ class NotebookLMClient:
             f"- Original HTML: `{html_name}`",
             f"- Structured data: `{json_name}`",
         ]
+        if isinstance(app_data, dict):
+            topic = self._first_artifact_text(app_data, ("topic", "summary", "description"))
+            if topic:
+                lines.append(f"- Summary: {topic}")
         for i, card in enumerate(cards, 1):
-            front = self._normalize_artifact_text(card.get("f"))
-            back = self._normalize_artifact_text(card.get("b"))
+            front = self._first_artifact_text(card, ("f", "front", "term", "question", "prompt"))
+            back = self._first_artifact_text(card, ("b", "back", "definition", "answer", "explanation"))
+            hint = self._first_artifact_text(card, ("hint",))
+            notes = self._first_artifact_text(card, ("notes", "rationale", "feedback"))
+            image_urls = self._extract_item_image_urls(card)
             lines.extend(
                 [
                     "",
@@ -1016,6 +1311,12 @@ class NotebookLMClient:
                     back or "(empty)",
                 ]
             )
+            if hint:
+                lines.extend(["", f"Hint: {hint}"])
+            if notes:
+                lines.extend(["", f"Notes: {notes}"])
+            if image_urls:
+                lines.extend(["", "Images: " + ", ".join(f"`{u}`" for u in image_urls)])
         return "\n".join(lines).rstrip() + "\n"
 
     def _render_quiz_markdown(
@@ -1024,6 +1325,7 @@ class NotebookLMClient:
         questions: list[dict],
         html_name: str,
         json_name: str,
+        app_data: dict | None = None,
     ) -> str:
         lines = [
             f"# {title}",
@@ -1033,16 +1335,47 @@ class NotebookLMClient:
             f"- Original HTML: `{html_name}`",
             f"- Structured data: `{json_name}`",
         ]
+        if isinstance(app_data, dict):
+            difficulty = self._first_artifact_text(app_data, ("difficulty", "level"))
+            if difficulty:
+                lines.append(f"- Difficulty: {difficulty}")
+            score_val = app_data.get("score") if "score" in app_data else app_data.get("userScore")
+            if score_val is not None:
+                lines.append(f"- Recorded score: {score_val}")
+            overall_feedback = self._first_artifact_text(
+                app_data,
+                ("feedback", "summaryFeedback", "overallFeedback", "summary"),
+            )
+            if overall_feedback:
+                lines.append(f"- Overall feedback: {overall_feedback}")
+            topics = app_data.get("topics") or app_data.get("keepLearning")
+            if isinstance(topics, list) and topics:
+                topic_names = []
+                for t in topics:
+                    if isinstance(t, str) and t.strip():
+                        topic_names.append(t.strip())
+                    elif isinstance(t, dict):
+                        t_name = self._first_artifact_text(t, ("title", "topic", "name", "label"))
+                        if t_name:
+                            topic_names.append(t_name)
+                if topic_names:
+                    lines.append(f"- Study topics: {', '.join(topic_names)}")
+
         for i, item in enumerate(questions, 1):
-            question = self._first_artifact_text(item, ("question", "prompt", "stem"))
+            question = self._first_artifact_text(item, ("question", "prompt", "stem", "text"))
             hint = self._first_artifact_text(item, ("hint",))
             question_format = self._quiz_question_format(item)
             options = self._quiz_options(item)
             correct_answers = self._quiz_correct_answers(item, options)
             explanation = self._first_artifact_text(
                 item,
-                ("rationale", "explanation", "feedback"),
+                ("rationale", "explanation", "feedback", "gradingNotes", "grading"),
             )
+            user_answer = self._first_artifact_text(
+                item,
+                ("userAnswer", "user_answer", "submittedAnswer", "selectedAnswer"),
+            )
+            image_urls = self._extract_item_image_urls(item)
             lines.extend(
                 [
                     "",
@@ -1053,11 +1386,15 @@ class NotebookLMClient:
             )
             if question_format:
                 lines.extend(["", f"Format: {question_format}"])
+            if image_urls:
+                lines.extend(["", "Images: " + ", ".join(f"`{u}`" for u in image_urls)])
             if hint:
                 lines.extend(["", f"Hint: {hint}"])
             if correct_answers:
                 label = "Correct answers" if len(correct_answers) > 1 else "Correct answer"
                 lines.extend(["", f"{label}: {', '.join(correct_answers)}"])
+            if user_answer:
+                lines.extend(["", f"User answer: {user_answer}"])
             if explanation:
                 lines.extend(["", f"Explanation: {explanation}"])
             if options:
@@ -1085,12 +1422,12 @@ class NotebookLMClient:
 
     def _render_mind_map_markdown(self, title: str, tree: dict, indent: int = 0) -> str:
         """Interactive mind map tree を読みやすい Markdown に変換"""
-        name = self._normalize_artifact_text(tree.get("name")) or "(untitled)"
+        name = self._normalize_artifact_text(tree.get("name") or tree.get("title") or tree.get("label")) or "(untitled)"
         lines = []
         if indent == 0:
             lines.extend([f"# {title}", "", "- Artifact subtype: interactive_mind_map", ""])
         lines.append("  " * indent + f"- {name}")
-        for child in tree.get("children", []) or []:
+        for child in tree.get("children", []) or tree.get("nodes", []) or []:
             if isinstance(child, dict):
                 child_md = self._render_mind_map_markdown(title, child, indent + 1)
                 if indent + 1 > 0:
@@ -1098,6 +1435,192 @@ class NotebookLMClient:
                     if child_lines and child_lines[0].startswith("# "):
                         child_lines = child_lines[4:]
                     lines.extend(child_lines)
+        return "\n".join(lines).rstrip() + "\n"
+
+    def _render_interactive_learning_overview_markdown(
+        self,
+        title: str,
+        payload,
+        html_name: str | None = None,
+        json_name: str | None = None,
+        referenced_ids: list[str] | None = None,
+    ) -> str:
+        """Interactive Learning Overview (HTML app_data または structured_content) を Markdown 化"""
+        lines = [
+            f"# {title}",
+            "",
+            "- Artifact subtype: interactive_learning_overview",
+        ]
+        if html_name:
+            lines.append(f"- Original HTML: `{html_name}`")
+        if json_name:
+            lines.append(f"- Structured data: `{json_name}`")
+        refs = referenced_ids if referenced_ids is not None else self._extract_referenced_artifact_ids(payload)
+        if refs:
+            lines.append(f"- Referenced artifacts: {', '.join(f'`{r}`' for r in refs)}")
+
+        if isinstance(payload, dict):
+            summary = self._first_artifact_text(
+                payload,
+                ("summary", "overview", "introduction", "description", "subtitle"),
+            )
+            if summary:
+                lines.extend(["", "## Overview", "", summary])
+
+            # Render sections / modules / lessons / blocks
+            sections = (
+                payload.get("sections")
+                or payload.get("modules")
+                or payload.get("lessons")
+                or payload.get("chapters")
+                or payload.get("blocks")
+                or []
+            )
+            if isinstance(sections, list) and sections:
+                lines.extend(["", "## Sections"])
+                for idx, sec in enumerate(sections, 1):
+                    if isinstance(sec, str):
+                        lines.extend(["", f"### Section {idx}", "", sec.strip()])
+                        continue
+                    if not isinstance(sec, dict):
+                        continue
+                    sec_title = self._first_artifact_text(
+                        sec,
+                        ("title", "heading", "name", "topic", "label"),
+                    ) or f"Section {idx}"
+                    sec_body = self._first_artifact_text(
+                        sec,
+                        ("content", "body", "text", "summary", "description", "markdown"),
+                    )
+                    lines.extend(["", f"### {idx}. {sec_title}"])
+                    if sec_body:
+                        lines.extend(["", sec_body])
+                    key_points = sec.get("keyPoints") or sec.get("bullets") or sec.get("takeaways") or sec.get("items")
+                    if isinstance(key_points, list) and key_points:
+                        lines.append("")
+                        for kp in key_points:
+                            if isinstance(kp, str) and kp.strip():
+                                lines.append(f"- {kp.strip()}")
+                            elif isinstance(kp, dict):
+                                kp_text = self._first_artifact_text(kp, ("text", "title", "content", "point"))
+                                if kp_text:
+                                    lines.append(f"- {kp_text}")
+                    # Section-level embedded slides/quiz/flashcards
+                    sec_slides = sec.get("slides")
+                    if isinstance(sec_slides, list) and sec_slides:
+                        lines.extend(["", "#### Embedded Slides"])
+                        for s_idx, slide in enumerate(sec_slides, 1):
+                            if isinstance(slide, dict):
+                                s_title = self._first_artifact_text(slide, ("title", "heading")) or f"Slide {s_idx}"
+                                s_body = self._first_artifact_text(slide, ("content", "body", "text", "notes"))
+                                lines.append(f"- **{s_title}**" + (f": {s_body}" if s_body else ""))
+                    sec_quiz = sec.get("quiz") or sec.get("questions")
+                    if isinstance(sec_quiz, list) and sec_quiz:
+                        quiz_questions = [q for q in sec_quiz if isinstance(q, dict)]
+                        if quiz_questions:
+                            quiz_md = self._render_quiz_markdown(
+                                f"{sec_title} - Quiz",
+                                quiz_questions,
+                                html_name or "",
+                                json_name or "",
+                            )
+                            body_lines = quiz_md.splitlines()[6:]
+                            lines.extend(["", "#### Embedded Quiz", *body_lines])
+                    sec_cards = sec.get("flashcards") or sec.get("cards")
+                    if isinstance(sec_cards, list) and sec_cards:
+                        card_items = [c for c in sec_cards if isinstance(c, dict)]
+                        if card_items:
+                            cards_md = self._render_flashcards_markdown(
+                                f"{sec_title} - Flashcards",
+                                card_items,
+                                html_name or "",
+                                json_name or "",
+                            )
+                            body_lines = cards_md.splitlines()[6:]
+                            lines.extend(["", "#### Embedded Flashcards", *body_lines])
+
+            # Top-level embedded slides
+            top_slides = payload.get("slides")
+            if isinstance(top_slides, list) and top_slides:
+                lines.extend(["", "## Embedded Slides", ""])
+                for s_idx, slide in enumerate(top_slides, 1):
+                    if isinstance(slide, dict):
+                        s_title = self._first_artifact_text(slide, ("title", "heading", "name")) or f"Slide {s_idx}"
+                        s_body = self._first_artifact_text(slide, ("content", "body", "text", "speakerNotes", "notes"))
+                        lines.append(f"### Slide {s_idx}: {s_title}")
+                        if s_body:
+                            lines.extend(["", s_body])
+                        bullets = slide.get("bullets") or slide.get("points")
+                        if isinstance(bullets, list):
+                            lines.append("")
+                            for b in bullets:
+                                b_text = self._normalize_artifact_text(b)
+                                if b_text:
+                                    lines.append(f"- {b_text}")
+                        lines.append("")
+
+            # Top-level embedded quiz
+            top_quiz = payload.get("quiz") or payload.get("questions")
+            if isinstance(top_quiz, list) and top_quiz:
+                quiz_questions = [q for q in top_quiz if isinstance(q, dict)]
+                if quiz_questions:
+                    quiz_md = self._render_quiz_markdown(
+                        f"{title} - Embedded Quiz",
+                        quiz_questions,
+                        html_name or "",
+                        json_name or "",
+                        payload,
+                    )
+                    lines.extend(["", "## Embedded Quiz", *quiz_md.splitlines()[6:]])
+
+            # Top-level embedded flashcards
+            top_cards = payload.get("flashcards") or payload.get("cards")
+            if isinstance(top_cards, list) and top_cards:
+                card_items = [c for c in top_cards if isinstance(c, dict)]
+                if card_items:
+                    cards_md = self._render_flashcards_markdown(
+                        f"{title} - Embedded Flashcards",
+                        card_items,
+                        html_name or "",
+                        json_name or "",
+                        payload,
+                    )
+                    lines.extend(["", "## Embedded Flashcards", *cards_md.splitlines()[6:]])
+
+            # Top-level embedded mindMap
+            mind_map = payload.get("mindMap") or payload.get("mind_map")
+            if isinstance(mind_map, dict) and ("name" in mind_map or "children" in mind_map or "nodes" in mind_map):
+                mm_md = self._render_mind_map_markdown(title, mind_map)
+                mm_lines = mm_md.splitlines()[4:]
+                lines.extend(["", "## Embedded Mind Map", "", *mm_lines])
+
+            # Citations / sources
+            citations = payload.get("citations") or payload.get("sources") or payload.get("references")
+            if isinstance(citations, list) and citations:
+                lines.extend(["", "## Sources & Citations", ""])
+                for c in citations:
+                    if isinstance(c, str) and c.strip():
+                        lines.append(f"- {c.strip()}")
+                    elif isinstance(c, dict):
+                        c_title = self._first_artifact_text(c, ("title", "name", "sourceTitle", "label", "id"))
+                        c_quote = self._first_artifact_text(c, ("quote", "snippet", "text"))
+                        if c_title and c_quote:
+                            lines.append(f"- **{c_title}**: {c_quote}")
+                        elif c_title or c_quote:
+                            lines.append(f"- {c_title or c_quote}")
+
+        elif isinstance(payload, list):
+            lines.extend(["", "## Structured Items", ""])
+            for idx, entry in enumerate(payload, 1):
+                if isinstance(entry, dict):
+                    e_title = self._first_artifact_text(entry, ("title", "heading", "name")) or f"Item {idx}"
+                    e_body = self._first_artifact_text(entry, ("content", "body", "text", "summary"))
+                    lines.append(f"### {idx}. {e_title}")
+                    if e_body:
+                        lines.extend(["", e_body, ""])
+                elif isinstance(entry, str) and entry.strip():
+                    lines.extend([f"- {entry.strip()}"])
+
         return "\n".join(lines).rstrip() + "\n"
 
     def _render_app_artifact_markdown(
@@ -1112,11 +1635,23 @@ class NotebookLMClient:
 
         if isinstance(app_data, dict):
             if variant == "flashcards":
-                cards = [c for c in app_data.get("flashcards", []) if isinstance(c, dict)]
-                return self._render_flashcards_markdown(title, cards, html_name, json_name)
+                raw_cards = app_data.get("flashcards") if "flashcards" in app_data else app_data.get("cards", [])
+                cards = [c for c in (raw_cards or []) if isinstance(c, dict)]
+                return self._render_flashcards_markdown(title, cards, html_name, json_name, app_data)
             if variant == "quiz":
-                questions = [q for q in app_data.get("quiz", []) if isinstance(q, dict)]
-                return self._render_quiz_markdown(title, questions, html_name, json_name)
+                raw_q = app_data.get("quiz")
+                if not isinstance(raw_q, list):
+                    raw_q = app_data.get("questions") or app_data.get("items") or []
+                questions = [q for q in raw_q if isinstance(q, dict)]
+                return self._render_quiz_markdown(title, questions, html_name, json_name, app_data)
+            if variant == "interactive_learning_overview":
+                return self._render_interactive_learning_overview_markdown(
+                    title,
+                    app_data,
+                    html_name=html_name,
+                    json_name=json_name,
+                    referenced_ids=artifact.get("referenced_artifact_ids"),
+                )
 
         lines = [
             f"# {title}",
@@ -1128,6 +1663,85 @@ class NotebookLMClient:
             "NotebookLM returned an HTML app for this artifact, but the structured payload could not be parsed.",
         ]
         return "\n".join(lines) + "\n"
+
+    def render_co_creation_review_markdown(self, artifact: dict) -> str:
+        """Slide Deck / Video Overview の共同制作レビュー情報 (outline / producer notes) を Markdown 化"""
+        title = artifact.get("title", "Untitled")
+        art_type = artifact.get("type", "unknown")
+        status = artifact.get("status", "unknown")
+        notes = artifact.get("co_creation_notes") or {}
+        gen_meta = artifact.get("generation_metadata") or {}
+
+        lines = [
+            f"# {title}",
+            "",
+            f"- Artifact type: {art_type}",
+            f"- Status: {status}",
+        ]
+        if artifact.get("video_format"):
+            lines.append(f"- Video format: {artifact['video_format']}")
+        if gen_meta.get("language"):
+            lines.append(f"- Language: {gen_meta['language']}")
+        if gen_meta.get("duration_seconds"):
+            lines.append(f"- Duration (seconds): {gen_meta['duration_seconds']}")
+        if gen_meta.get("aspect_ratio"):
+            lines.append(f"- Aspect ratio: {gen_meta['aspect_ratio']}")
+
+        prompt = notes.get("prompt") or gen_meta.get("prompt")
+        if prompt:
+            lines.extend(["", "## Generation Prompt / Instructions", "", str(prompt).strip()])
+
+        user_revisions = notes.get("user_revisions") or notes.get("revision_instructions")
+        if user_revisions:
+            lines.extend(["", "## User Revision Instructions", ""])
+            if isinstance(user_revisions, list):
+                for rev in user_revisions:
+                    lines.append(f"- {self._normalize_artifact_text(rev)}")
+            else:
+                lines.append(self._normalize_artifact_text(user_revisions))
+
+        outline_notes = notes.get("outline_notes")
+        if outline_notes:
+            lines.extend(["", "## Review Outline Notes (Slide Deck)", ""])
+            if isinstance(outline_notes, list):
+                for idx, slide_note in enumerate(outline_notes, 1):
+                    if isinstance(slide_note, dict):
+                        s_title = self._first_artifact_text(slide_note, ("title", "heading", "slideTitle", "name")) or f"Slide {idx}"
+                        s_body = self._first_artifact_text(slide_note, ("notes", "outline", "content", "body", "description"))
+                        lines.append(f"### Slide {idx}: {s_title}")
+                        if s_body:
+                            lines.extend(["", s_body])
+                        bullets = slide_note.get("bullets") or slide_note.get("points")
+                        if isinstance(bullets, list):
+                            lines.append("")
+                            for b in bullets:
+                                lines.append(f"- {self._normalize_artifact_text(b)}")
+                        lines.append("")
+                    else:
+                        lines.append(f"- {self._normalize_artifact_text(slide_note)}")
+            else:
+                lines.append(self._normalize_artifact_text(outline_notes))
+
+        producer_notes = notes.get("producer_notes")
+        if producer_notes:
+            lines.extend(["", "## Review Producer Notes (Video Overview)", ""])
+            if isinstance(producer_notes, list):
+                for idx, scene_note in enumerate(producer_notes, 1):
+                    if isinstance(scene_note, dict):
+                        sc_title = self._first_artifact_text(scene_note, ("title", "scene", "heading", "name")) or f"Scene {idx}"
+                        sc_body = self._first_artifact_text(scene_note, ("notes", "producerNotes", "script", "direction", "content", "body"))
+                        lines.append(f"### {sc_title}")
+                        if sc_body:
+                            lines.extend(["", sc_body, ""])
+                    else:
+                        lines.append(f"- {self._normalize_artifact_text(scene_note)}")
+            elif isinstance(producer_notes, dict):
+                for k, v in producer_notes.items():
+                    lines.extend([f"### {k}", "", self._normalize_artifact_text(v), ""])
+            else:
+                lines.append(self._normalize_artifact_text(producer_notes))
+
+        return "\n".join(lines).rstrip() + "\n"
 
     # ------------------------------------------------------------------
     # Artifacts (Studio)
@@ -1157,8 +1771,285 @@ class NotebookLMClient:
             return None
         return self._build_artifact_record(result[0])
 
-    def _extract_artifact_download(self, art: list, type_code: int) -> dict:
-        """アーティファクトからダウンロード情報を抽出"""
+    def _extract_video_metadata(self, video_slot, info: dict):
+        """Video Overview (Explainer / Short / Cinematic) の形式とメタデータを抽出"""
+        gen_meta = info.setdefault("generation_metadata", {})
+        co_notes = {}
+
+        def scan(node):
+            if isinstance(node, dict):
+                style = self._first_artifact_text(node, ("videoStyle", "style", "format", "videoFormat", "subtype"))
+                if style:
+                    sl = style.lower()
+                    if "short" in sl or "brief" in sl or "vertical" in sl:
+                        info["video_format"] = "short"
+                    elif "cinematic" in sl:
+                        info["video_format"] = "cinematic"
+                    elif "explainer" in sl or "standard" in sl:
+                        info["video_format"] = "explainer"
+                    else:
+                        info["video_format"] = sl
+                lang = self._first_artifact_text(node, ("language", "locale", "lang"))
+                if lang:
+                    gen_meta["language"] = lang
+                dur = node.get("durationSeconds") or node.get("duration_seconds") or node.get("duration")
+                if isinstance(dur, (int, float)) and dur > 0:
+                    gen_meta["duration_seconds"] = dur
+                    if "video_format" not in info and dur <= 75:
+                        info["video_format"] = "short"
+                aspect = self._first_artifact_text(node, ("aspectRatio", "aspect_ratio", "orientation"))
+                if aspect:
+                    gen_meta["aspect_ratio"] = aspect
+                    if "video_format" not in info and ("9:16" in aspect or "vertical" in aspect.lower() or "portrait" in aspect.lower()):
+                        info["video_format"] = "short"
+                p_notes = node.get("producerNotes") or node.get("producer_notes") or node.get("reviewProducerNotes") or node.get("scenes")
+                if p_notes:
+                    co_notes["producer_notes"] = p_notes
+                prompt = self._first_artifact_text(node, ("prompt", "customPrompt", "instructions", "userInstructions"))
+                if prompt:
+                    co_notes["prompt"] = prompt
+                    gen_meta["prompt"] = prompt
+                rev = node.get("revisionInstructions") or node.get("userRevisions") or node.get("feedback")
+                if rev:
+                    co_notes["user_revisions"] = rev
+                for v in node.values():
+                    scan(v)
+            elif isinstance(node, list):
+                # Check common positional conventions in video_slot
+                for item in node:
+                    if isinstance(item, str):
+                        low = item.strip().lower()
+                        if low in {"explainer", "short", "cinematic", "short_video", "brief"}:
+                            info["video_format"] = "short" if low in {"short", "short_video", "brief"} else low
+                        elif re.fullmatch(r"[a-z]{2}(?:-[A-Z]{2})?", item.strip()):
+                            gen_meta.setdefault("language", item.strip())
+                        elif len(item.strip()) > 20 and not item.strip().startswith("http"):
+                            # Producer notes or prompt string in video slot
+                            co_notes.setdefault("producer_notes", item.strip())
+                    elif isinstance(item, (dict, list)):
+                        scan(item)
+
+        if isinstance(video_slot, list) and len(video_slot) > 1 and isinstance(video_slot[1], int):
+            mapped = VIDEO_OVERVIEW_STYLES.get(video_slot[1])
+            if mapped:
+                info["video_format"] = mapped
+        scan(video_slot)
+        if co_notes:
+            info["co_creation_notes"] = {**info.get("co_creation_notes", {}), **co_notes}
+
+    def _extract_slide_co_creation_metadata(self, slide_slot, info: dict):
+        """Slide Deck の Review outline notes / prompt / 生成設定を抽出"""
+        gen_meta = info.setdefault("generation_metadata", {})
+        co_notes = {}
+
+        def scan(node):
+            if isinstance(node, dict):
+                o_notes = (
+                    node.get("outlineNotes")
+                    or node.get("outline_notes")
+                    or node.get("reviewOutlineNotes")
+                    or node.get("outline")
+                    or node.get("slidesOutline")
+                )
+                if o_notes:
+                    co_notes["outline_notes"] = o_notes
+                prompt = self._first_artifact_text(node, ("prompt", "customPrompt", "instructions", "userInstructions"))
+                if prompt:
+                    co_notes["prompt"] = prompt
+                    gen_meta["prompt"] = prompt
+                rev = node.get("revisionInstructions") or node.get("userRevisions") or node.get("feedback")
+                if rev:
+                    co_notes["user_revisions"] = rev
+                lang = self._first_artifact_text(node, ("language", "locale", "lang"))
+                if lang:
+                    gen_meta["language"] = lang
+                for v in node.values():
+                    scan(v)
+            elif isinstance(node, list):
+                for item in node:
+                    if isinstance(item, (dict, list)):
+                        scan(item)
+
+        scan(slide_slot)
+        # Check positional outline notes on slide_slot (e.g., art[16][5] or art[16][1] when non-URL)
+        if isinstance(slide_slot, list):
+            for idx in (1, 5, 6, 7):
+                if len(slide_slot) > idx and slide_slot[idx]:
+                    candidate = slide_slot[idx]
+                    if isinstance(candidate, str) and not candidate.startswith("http") and len(candidate.strip()) > 10:
+                        co_notes.setdefault("outline_notes", candidate.strip())
+                    elif isinstance(candidate, list) and all(isinstance(x, (str, dict)) for x in candidate) and candidate:
+                        co_notes.setdefault("outline_notes", candidate)
+        if co_notes:
+            info["co_creation_notes"] = {**info.get("co_creation_notes", {}), **co_notes}
+
+    def _infer_generated_file_extension(
+        self,
+        title: str | None,
+        file_name: str | None,
+        content_mime: str | None,
+        download_url: str | None,
+        inline_content: str | None,
+        structured_content,
+    ) -> str | None:
+        """生成ファイル (type_code == 10) の拡張子をタイトル・MIME・URL・内容から推定"""
+        for name_candidate in (file_name, title):
+            if isinstance(name_candidate, str) and "." in name_candidate:
+                ext = Path(name_candidate.strip()).suffix.lower()
+                if ext == ".markdown":
+                    return ".md"
+                if ext == ".jpeg":
+                    return ".jpg"
+                if ext in SUPPORTED_GENERATED_FILE_EXTENSIONS:
+                    return ext
+
+        norm_mime = _normalized_mime(content_mime)
+        if norm_mime in GENERATED_FILE_MIME_EXTENSIONS:
+            return GENERATED_FILE_MIME_EXTENSIONS[norm_mime]
+        if norm_mime:
+            guessed = mimetypes.guess_extension(norm_mime)
+            if guessed in SUPPORTED_GENERATED_FILE_EXTENSIONS:
+                return ".jpg" if guessed == ".jpeg" else guessed
+
+        if isinstance(download_url, str) and download_url.startswith("http"):
+            try:
+                url_path = urllib.parse.urlsplit(download_url).path
+                ext = Path(url_path).suffix.lower()
+                if ext in SUPPORTED_GENERATED_FILE_EXTENSIONS:
+                    return ".jpg" if ext == ".jpeg" else (".md" if ext == ".markdown" else ext)
+            except ValueError:
+                pass
+
+        if isinstance(inline_content, str) and inline_content.strip():
+            stripped = inline_content.lstrip()
+            if stripped.startswith("<svg") or "<svg" in stripped[:300].lower():
+                return ".svg"
+            if stripped.startswith(("{", "[")):
+                try:
+                    json.loads(stripped)
+                    return ".json"
+                except json.JSONDecodeError:
+                    pass
+            if stripped.startswith("#") or "\n## " in stripped:
+                return ".md"
+            return ".txt"
+
+        if structured_content is not None:
+            return ".json"
+
+        return None
+
+    def _extract_generated_file_info(self, art: list, title: str = "") -> dict:
+        """type_code == 10 ('file') のダウンロードURL・MIME・ファイル名・インライン実体を抽出"""
+        info: dict = {}
+        file_name = None
+        content_mime = None
+        download_url = None
+        inline_content = None
+        structured_content = None
+
+        def scan(node):
+            nonlocal file_name, content_mime, download_url, inline_content, structured_content
+            if isinstance(node, dict):
+                if not download_url:
+                    u = self._first_artifact_text(node, ("downloadUrl", "download_url", "url", "fileUrl", "mediaUrl"))
+                    if u.startswith(("http://", "https://")):
+                        download_url = u
+                if not content_mime:
+                    m = self._first_artifact_text(node, ("mimeType", "mime_type", "contentType", "content_mime"))
+                    if "/" in m:
+                        content_mime = m
+                if not file_name:
+                    fn = self._first_artifact_text(node, ("fileName", "filename", "file_name", "name"))
+                    if fn and "." in fn:
+                        file_name = fn
+                if inline_content is None:
+                    for key in ("content", "text", "markdown", "csv", "svg", "body"):
+                        if isinstance(node.get(key), str) and node[key].strip():
+                            inline_content = node[key]
+                            break
+                if structured_content is None and "data" in node and isinstance(node["data"], (dict, list)):
+                    structured_content = node["data"]
+                for v in node.values():
+                    scan(v)
+            elif isinstance(node, list):
+                # Pattern [url, ..., mime_type] or [url, filename, mime_type]
+                if (
+                    len(node) >= 2
+                    and isinstance(node[0], str)
+                    and node[0].startswith(("http://", "https://"))
+                ):
+                    if not download_url:
+                        download_url = node[0]
+                    for elem in node[1:]:
+                        if isinstance(elem, str):
+                            if "/" in elem and not elem.startswith("http") and not content_mime:
+                                content_mime = elem
+                            elif "." in elem and not elem.startswith("http") and not file_name:
+                                file_name = elem
+                for item in node:
+                    if isinstance(item, (dict, list)):
+                        scan(item)
+                    elif isinstance(item, str):
+                        s = item.strip()
+                        if not s:
+                            continue
+                        if s.startswith(("http://", "https://")) and not download_url:
+                            download_url = s
+                        elif (
+                            "/" in s
+                            and not s.startswith("http")
+                            and " " not in s
+                            and _normalized_mime(s) in GENERATED_FILE_MIME_EXTENSIONS
+                            and not content_mime
+                        ):
+                            content_mime = s
+                        elif (
+                            "." in s
+                            and " " not in s
+                            and Path(s).suffix.lower() in SUPPORTED_GENERATED_FILE_EXTENSIONS
+                            and not file_name
+                        ):
+                            file_name = s
+                        elif (s.startswith("<svg") or s.startswith("# ") or "\n" in s) and inline_content is None:
+                            inline_content = item
+
+        # Scan payload slots starting after status_code (art[5:])
+        for slot in art[5:]:
+            scan(slot)
+
+        ext = self._infer_generated_file_extension(
+            title=title,
+            file_name=file_name,
+            content_mime=content_mime,
+            download_url=download_url,
+            inline_content=inline_content,
+            structured_content=structured_content,
+        )
+
+        if file_name:
+            info["file_name"] = file_name
+        if content_mime:
+            info["content_mime"] = _normalized_mime(content_mime)
+        if ext:
+            info["file_extension"] = ext
+        if download_url:
+            info["download_url"] = download_url
+
+        # Never fake extracted text as an original binary file (.pdf, .docx, .xlsx, .pptx, .png, .jpg, .gif)
+        if ext in BINARY_GENERATED_FILE_EXTENSIONS:
+            if not download_url and inline_content:
+                info["extracted_text_only"] = inline_content
+        else:
+            if inline_content is not None:
+                info["content"] = inline_content
+            elif structured_content is not None:
+                info["structured_content"] = structured_content
+
+        return info
+
+    def _extract_artifact_download(self, art: list, type_code: int, title: str = "") -> dict:
+        """アーティファクトからダウンロード情報・メタデータを抽出"""
         info = {}
         try:
             if type_code == 1:  # audio
@@ -1179,28 +2070,38 @@ class NotebookLMClient:
                         lowered = payload.lstrip().lower()
                         if "<html" in lowered or "<app-root" in lowered:
                             info["app_html"] = payload
+                            info["variant"] = "interactive_learning_overview"
                             app_data = self._extract_app_artifact_data(payload)
                             if app_data is not None:
                                 info["app_data"] = app_data
+                                refs = self._extract_referenced_artifact_ids(app_data)
+                                if refs:
+                                    info["referenced_artifact_ids"] = refs
                         else:
                             info["content"] = payload
                     elif payload is not None:
-                        # Newly introduced report formats may return structured data.
-                        # Keep it exportable even before their schema is fully understood.
                         info["structured_content"] = payload
-            elif type_code == 3:  # video
-                self._find_media_url(art[8] if len(art) > 8 else [], "video/mp4", info)
+                        info["variant"] = "interactive_learning_overview"
+                        refs = self._extract_referenced_artifact_ids(payload)
+                        if refs:
+                            info["referenced_artifact_ids"] = refs
+            elif type_code == 3:  # video_overview
+                video_slot = art[8] if len(art) > 8 else []
+                self._find_media_url(video_slot, "video/mp4", info)
+                self._extract_video_metadata(video_slot, info)
             elif type_code == 7:  # infographic
                 if len(art) > 14 and art[14]:
                     info["download_url"] = art[14][2][0][1][0]
             elif type_code == 8:  # slide_deck
-                if len(art) > 16 and art[16] and len(art[16]) > 3:
-                    info["download_url"] = art[16][3]
+                slide_slot = art[16] if len(art) > 16 else []
+                if slide_slot and len(slide_slot) > 3:
+                    if isinstance(slide_slot[3], str) and slide_slot[3].startswith("http"):
+                        info["download_url"] = slide_slot[3]
                     # PPTX download URL (art[16][4], available on newer slides)
-                    if len(art[16]) > 4 and isinstance(art[16][4], str) and art[16][4].startswith("http"):
-                        info["pptx_url"] = art[16][4]
+                    if len(slide_slot) > 4 and isinstance(slide_slot[4], str) and slide_slot[4].startswith("http"):
+                        info["pptx_url"] = slide_slot[4]
                     # 各ページの画像URLを抽出
-                    pages = art[16][2] if len(art[16]) > 2 and isinstance(art[16][2], list) else []
+                    pages = slide_slot[2] if len(slide_slot) > 2 and isinstance(slide_slot[2], list) else []
                     page_images = []
                     for page in pages:
                         try:
@@ -1210,6 +2111,7 @@ class NotebookLMClient:
                             continue
                     if page_images:
                         info["page_images"] = page_images
+                self._extract_slide_co_creation_metadata(slide_slot, info)
             elif type_code == 4:  # flashcards / quiz / interactive mind map
                 variant = self._artifact_variant_from_raw(art)
                 if variant == "interactive_mind_map":
@@ -1218,16 +2120,55 @@ class NotebookLMClient:
                         info["structured_content"] = tree
                 else:
                     html_content = art[9][0] if len(art) > 9 and art[9] else ""
-                    if isinstance(html_content, str) and "<html" in html_content.lower():
+                    if isinstance(html_content, str) and ("<html" in html_content.lower() or "<app-root" in html_content.lower()):
                         info["app_html"] = html_content
                         app_data = self._extract_app_artifact_data(html_content)
                         if app_data is not None:
                             info["app_data"] = app_data
+                            refs = self._extract_referenced_artifact_ids(app_data)
+                            if refs:
+                                info["referenced_artifact_ids"] = refs
+                    try:
+                        lang = art[9][1][3]
+                        if isinstance(lang, str) and lang:
+                            info.setdefault("generation_metadata", {})["language"] = lang
+                    except (IndexError, TypeError):
+                        pass
             elif type_code == 9:  # data_table
                 try:
                     info["content"] = self._extract_data_table(art[18])
                 except (IndexError, TypeError):
                     pass
+            elif type_code == 10:  # generated file (PDF, DOCX, MD, TXT, XLSX, PPTX, CSV, JSON, PNG, JPG, GIF, SVG)
+                info.update(self._extract_generated_file_info(art, title=title))
+            elif type_code == 11:  # guided_view / interactive learning overview
+                info["variant"] = "interactive_learning_overview"
+                for slot in art[5:]:
+                    if isinstance(slot, str):
+                        low = slot.lstrip().lower()
+                        if "<html" in low or "<app-root" in low:
+                            info["app_html"] = slot
+                            app_data = self._extract_app_artifact_data(slot)
+                            if app_data is not None:
+                                info["app_data"] = app_data
+                            break
+                        elif len(slot.strip()) > 0 and "content" not in info:
+                            info["content"] = slot
+                    elif isinstance(slot, (dict, list)) and slot and "structured_content" not in info:
+                        if isinstance(slot, list) and len(slot) == 1 and isinstance(slot[0], str):
+                            low = slot[0].lstrip().lower()
+                            if "<html" in low or "<app-root" in low:
+                                info["app_html"] = slot[0]
+                                app_data = self._extract_app_artifact_data(slot[0])
+                                if app_data is not None:
+                                    info["app_data"] = app_data
+                                break
+                        info["structured_content"] = slot
+                target_data = info.get("app_data") or info.get("structured_content")
+                if target_data is not None:
+                    refs = self._extract_referenced_artifact_ids(target_data)
+                    if refs:
+                        info["referenced_artifact_ids"] = refs
         except (IndexError, TypeError):
             pass
         return info
@@ -1260,7 +2201,7 @@ class NotebookLMClient:
         return buf.getvalue()
 
     def _download_app_artifact(self, artifact: dict, dest_path: str | Path) -> bool:
-        """type 4 artifact を subtype に応じて Markdown + JSON/HTML で保存"""
+        """type 4 / Interactive Learning Overview artifact を subtype に応じて Markdown + JSON/HTML で保存"""
         dest_path = Path(dest_path)
         dest_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -1294,46 +2235,107 @@ class NotebookLMClient:
             return True
 
         html_content = detail.get("app_html")
-        if not isinstance(html_content, str) or not html_content:
-            return False
+        structured_content = detail.get("structured_content")
 
-        app_data = detail.get("app_data")
-        if app_data is None:
-            app_data = self._extract_app_artifact_data(html_content)
+        if isinstance(html_content, str) and html_content:
+            app_data = detail.get("app_data")
+            if app_data is None:
+                app_data = self._extract_app_artifact_data(html_content)
 
-        html_dest = dest_path.with_suffix(".html")
-        json_dest = dest_path.with_suffix(".json")
-        markdown = self._render_app_artifact_markdown(detail, app_data, html_dest.name, json_dest.name)
+            md_dest = dest_path if dest_path.suffix.lower() == ".md" else dest_path.with_suffix(".md")
+            html_dest = dest_path.with_suffix(".html")
+            json_dest = dest_path.with_suffix(".json")
+            resolved_variant = self._artifact_variant_from_data(detail, app_data)
+            referenced_ids = detail.get("referenced_artifact_ids") or self._extract_referenced_artifact_ids(app_data)
+            markdown = self._render_app_artifact_markdown(detail, app_data, html_dest.name, json_dest.name)
 
-        with open(dest_path, "w", encoding="utf-8") as f:
-            f.write(markdown)
-        with open(html_dest, "w", encoding="utf-8") as f:
-            f.write(html_content)
-        with open(json_dest, "w", encoding="utf-8") as f:
-            json.dump(
-                {
-                    "id": detail.get("id"),
-                    "title": detail.get("title"),
-                    "type": detail.get("type"),
-                    "variant": self._artifact_variant_from_data(detail, app_data),
-                    "status": detail.get("status"),
-                    "data": app_data,
-                },
-                f,
-                ensure_ascii=False,
-                indent=2,
+            with open(md_dest, "w", encoding="utf-8") as f:
+                f.write(markdown)
+            with open(html_dest, "w", encoding="utf-8") as f:
+                f.write(html_content)
+            json_payload = {
+                "id": detail.get("id"),
+                "title": detail.get("title"),
+                "type": detail.get("type"),
+                "variant": resolved_variant,
+                "status": detail.get("status"),
+                "data": app_data,
+            }
+            if referenced_ids:
+                json_payload["referenced_artifact_ids"] = referenced_ids
+            with open(json_dest, "w", encoding="utf-8") as f:
+                json.dump(json_payload, f, ensure_ascii=False, indent=2)
+            return True
+
+        if structured_content is not None and (
+            variant == "interactive_learning_overview"
+            or detail.get("type") in {"report", "guided_view"}
+        ):
+            md_dest = dest_path.with_suffix(".md")
+            json_dest = dest_path.with_suffix(".json")
+            referenced_ids = detail.get("referenced_artifact_ids") or self._extract_referenced_artifact_ids(structured_content)
+            markdown = self._render_interactive_learning_overview_markdown(
+                detail.get("title", "Untitled"),
+                structured_content,
+                html_name=None,
+                json_name=json_dest.name,
+                referenced_ids=referenced_ids,
             )
-        return True
+            with open(md_dest, "w", encoding="utf-8") as f:
+                f.write(markdown)
+            with open(json_dest, "w", encoding="utf-8") as f:
+                json.dump(structured_content, f, ensure_ascii=False, indent=2)
+            return True
+
+        return False
 
     def download_artifact(self, artifact: dict, dest_path: str | Path) -> bool:
         """アーティファクトをファイルにダウンロード"""
         dest_path = Path(dest_path)
         dest_path.parent.mkdir(parents=True, exist_ok=True)
 
-        if artifact.get("type_code") == 4 or artifact.get("app_html"):
+        art_type = artifact.get("type")
+        type_code = artifact.get("type_code")
+
+        # Generated file artifact (type_code == 10 / 'file'):
+        # If detail was not in list row, try get_artifact once when possible.
+        if (type_code == 10 or art_type == "file") and not (
+            artifact.get("download_url")
+            or artifact.get("content")
+            or artifact.get("structured_content") is not None
+        ):
+            if hasattr(self, "get_artifact") and artifact.get("id"):
+                try:
+                    detail = self.get_artifact(artifact["id"])
+                except Exception:
+                    detail = None
+                if isinstance(detail, dict):
+                    for k in ("download_url", "content", "structured_content", "file_extension", "content_mime", "file_name", "extracted_text_only"):
+                        if detail.get(k) is not None and artifact.get(k) is None:
+                            artifact[k] = detail[k]
+
+        # Never fake extracted text as a binary file (.pdf, .docx, .xlsx, .pptx, .png, .jpg, .gif)
+        file_ext = (artifact.get("file_extension") or dest_path.suffix or "").lower()
+        if (type_code == 10 or art_type == "file") and file_ext in BINARY_GENERATED_FILE_EXTENSIONS:
+            if artifact.get("download_url"):
+                return self.download_url(artifact["download_url"], dest_path)
+            return False
+
+        if (
+            type_code == 4
+            or artifact.get("app_html")
+            or (
+                artifact.get("variant") == "interactive_learning_overview"
+                and artifact.get("structured_content") is not None
+            )
+        ):
             return self._download_app_artifact(artifact, dest_path)
 
-        # インラインコンテンツの場合（report, data_table）
+        # URLダウンロードの場合（バイナリ/原本ファイル優先）
+        if "download_url" in artifact and artifact["download_url"]:
+            return self.download_url(artifact["download_url"], dest_path)
+
+        # インラインコンテンツの場合（report, data_table, text-based generated file）
         if "content" in artifact and artifact["content"]:
             with open(dest_path, "w", encoding="utf-8") as f:
                 f.write(artifact["content"])
@@ -1345,23 +2347,20 @@ class NotebookLMClient:
                 json.dump(artifact["structured_content"], f, ensure_ascii=False, indent=2)
             return True
 
-        # URLダウンロードの場合
-        if "download_url" in artifact and artifact["download_url"]:
-            return self.download_url(artifact["download_url"], dest_path)
-
         # Known-but-not-yet-rendered artifact families are still preserved as
-        # a first-class JSON export instead of being reported as a total loss.
-        if artifact.get("type") in {"guided_view", "fantasy_map", "file", "mind_map"}:
+        # a first-class JSON export instead of being reported as a total loss,
+        # provided dest_path is a JSON metadata/raw fallback (not a faked binary file).
+        if art_type in {"guided_view", "fantasy_map", "file", "mind_map"} and dest_path.suffix.lower() == ".json":
             with open(dest_path, "w", encoding="utf-8") as f:
                 json.dump(
                     {
                         "id": artifact.get("id"),
                         "title": artifact.get("title"),
-                        "type": artifact.get("type"),
-                        "type_code": artifact.get("type_code"),
+                        "type": art_type,
+                        "type_code": type_code,
                         "variant": artifact.get("variant"),
                         "status": artifact.get("status"),
-                        "raw": artifact.get("_raw"),
+                        "raw": sanitize_for_backup(artifact.get("_raw")),
                     },
                     f,
                     ensure_ascii=False,
