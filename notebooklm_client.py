@@ -8,6 +8,8 @@ Python 標準ライブラリのみで動作し、外部パッケージ依存は�
 クッキーを使用します。
 """
 
+import contextlib
+import http.client
 import http.cookiejar
 import html as html_lib
 import json
@@ -15,6 +17,7 @@ import mimetypes
 import os
 import re
 import ssl
+import tempfile
 import time
 import urllib.parse
 import urllib.error
@@ -46,6 +49,9 @@ BUILD_LABEL_PATTERN = re.compile(r"\bboq_[A-Za-z0-9_-]+_[0-9]{8}\.[0-9]+_p[0-9]+
 
 DEFAULT_COOKIES_PATH = Path.home() / ".notebooklm-mcp-cli" / "profiles" / "default" / "cookies.json"
 MAX_UPLOAD_BYTES = 200 * 1024 * 1024
+DOWNLOAD_SOCKET_TIMEOUT_SECONDS = 30
+DOWNLOAD_TOTAL_TIMEOUT_SECONDS = 10 * 60
+DOWNLOAD_CHUNK_BYTES = 256 * 1024
 
 USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -2550,19 +2556,41 @@ class NotebookLMClient:
         }
         req = urllib.request.Request(url, headers=headers)
 
+        partial_path: Path | None = None
         try:
-            resp = self._opener.open(req)
-            written = 0
-            with open(dest_path, "wb") as f:
-                while True:
-                    chunk = resp.read(1024 * 1024)  # 1MB チャンク
-                    if not chunk:
-                        break
-                    f.write(chunk)
-                    written += len(chunk)
-            if written == 0:
-                dest_path.unlink(missing_ok=True)
+            # The socket timeout bounds stalled headers/reads; the deadline
+            # also bounds a connection that keeps trickling bytes forever.
+            with contextlib.closing(
+                self._opener.open(req, timeout=DOWNLOAD_SOCKET_TIMEOUT_SECONDS)
+            ) as resp:
+                with tempfile.NamedTemporaryFile(
+                    mode="wb",
+                    prefix=f".{dest_path.name}.",
+                    suffix=".part",
+                    dir=dest_path.parent,
+                    delete=False,
+                ) as partial:
+                    partial_path = Path(partial.name)
+                    written = 0
+                    deadline = time.monotonic() + DOWNLOAD_TOTAL_TIMEOUT_SECONDS
+                    while True:
+                        if time.monotonic() >= deadline:
+                            return False
+                        chunk = resp.read(DOWNLOAD_CHUNK_BYTES)
+                        if not chunk:
+                            break
+                        partial.write(chunk)
+                        written += len(chunk)
+
+            if not written:
                 return False
+            # Do not overwrite an existing good backup until the new file
+            # has completed downloading and closed successfully.
+            partial_path.replace(dest_path)
+            partial_path = None
             return True
-        except (urllib.error.HTTPError, urllib.error.URLError, OSError):
+        except (urllib.error.HTTPError, urllib.error.URLError, OSError, http.client.HTTPException):
             return False
+        finally:
+            if partial_path is not None:
+                partial_path.unlink(missing_ok=True)
