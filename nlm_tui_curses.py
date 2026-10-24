@@ -38,7 +38,12 @@ except (ImportError, ModuleNotFoundError) as exc:
 
 from notebooklm_client import AuthenticationError, NotebookLMClient, NotebookLMError
 from nlm_backup import ARTIFACT_EXTENSIONS, format_timestamp, sanitize_filename, mindmap_to_markdown, save_artifact, save_source, save_note, save_mindmap, build_backup_metadata
-from nlm_upload import TEXT_EXTENSIONS, UPLOAD_FILE_TYPES, collect_files
+from nlm_upload import (
+    PASTED_TEXT_EXTENSIONS,
+    UNVERIFIED_UPLOAD_EXTENSIONS,
+    UPLOAD_FILE_TYPES,
+    collect_files,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -242,6 +247,10 @@ def _build_detail_lines(client: NotebookLMClient, nb: dict) -> list[str]:
     sources = client.list_sources(nb["id"])
     artifacts = client.list_artifacts(nb["id"])
     notes = client.list_notes(nb["id"])
+    try:
+        mindmaps = client.list_mindmaps(nb["id"])
+    except (AttributeError, NotebookLMError):
+        mindmaps = []
 
     lines = [f"Notebook: {nb['title']}", f"ID: {nb['id']}", ""]
     lines.append(f"Sources ({len(sources)})")
@@ -251,11 +260,23 @@ def _build_detail_lines(client: NotebookLMClient, nb: dict) -> list[str]:
     lines.append(f"Artifacts ({len(artifacts)})")
     for art in artifacts:
         art_label = _artifact_variant(art) or art.get("type", "unknown")
-        lines.append(f"  - [{art.get('status', 'unknown')}] [{art_label}] {art.get('title', 'Untitled')}")
+        extra = ""
+        if art.get("video_format"):
+            extra += f"/{art['video_format']}"
+        elif art.get("file_extension"):
+            extra += f"/{art['file_extension']}"
+        if art.get("co_creation_notes"):
+            extra += " (co-create notes)"
+        lines.append(f"  - [{art.get('status', 'unknown')}] [{art_label}{extra}] {art.get('title', 'Untitled')}")
     lines.append("")
     lines.append(f"Notes ({len(notes)})")
     for note in notes:
         lines.append(f"  - {note.get('title', 'Untitled')}")
+    if mindmaps:
+        lines.append("")
+        lines.append(f"Mindmaps ({len(mindmaps)})")
+        for mm in mindmaps:
+            lines.append(f"  - {mm.get('title', 'Untitled')}")
     return lines
 
 
@@ -298,14 +319,16 @@ def _upload_to_notebook(
         ext = f.suffix.lower()
         msg_name = f.name
         try:
-            if ext in TEXT_EXTENSIONS:
+            if ext in UPLOAD_FILE_TYPES:
+                source_id = client.upload_file(notebook_id, f)
+            elif ext in PASTED_TEXT_EXTENSIONS:
                 try:
                     text = f.read_text(encoding="utf-8")
                     source_id = client.add_source_text(notebook_id, f.name, text)
                 except UnicodeDecodeError:
-                    source_id = client.upload_file(notebook_id, f)
-            elif ext in UPLOAD_FILE_TYPES:
-                source_id = client.upload_file(notebook_id, f)
+                    source_id = None
+            elif ext in UNVERIFIED_UPLOAD_EXTENSIONS:
+                source_id = None
             else:
                 source_id = None
 

@@ -359,6 +359,67 @@ class RestoreDryRunTests(unittest.TestCase):
         self.assertEqual(plan["sources"][0]["status"], "preserved_only")
         self.assertEqual(plan["sources"][0]["action"], "keep_local")
 
+    def test_dry_run_includes_artifact_sidecar_categories_and_unofficial_warnings(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            self._write_json(
+                root / "metadata.json",
+                {"id": "nb-2", "title": "Studio Rich", "backup_schema_version": 2},
+            )
+            art_dir = root / "artifacts"
+            (art_dir / "overview.md").parent.mkdir(parents=True, exist_ok=True)
+            (art_dir / "overview.md").write_text("# Overview", encoding="utf-8")
+            self._write_json(
+                art_dir / "_metadata" / "ilo.json",
+                {
+                    "id": "ilo",
+                    "title": "Study Overview",
+                    "type": "report",
+                    "variant": "interactive_learning_overview",
+                    "status": "completed",
+                    "official_support": True,
+                    "backup_mode": "interactive_bundle",
+                    "restore_category": "backup_only_no_server_restore",
+                    "referenced_artifact_ids": ["quiz-1"],
+                    "files": ["overview.md"],
+                },
+            )
+            self._write_json(
+                art_dir / "_metadata" / "unk.json",
+                {
+                    "id": "unk",
+                    "title": "Future Prototype",
+                    "type": "unknown_77",
+                    "variant": None,
+                    "status": "completed",
+                    "official_support": False,
+                    "backup_mode": "raw_json_only",
+                    "restore_category": "raw_json_only",
+                    "files": [],
+                },
+            )
+
+            plan = build_restore_plan(root)
+
+        art_summary = plan["artifacts"]
+        self.assertTrue(art_summary["preserved"])
+        self.assertEqual(art_summary["counts_by_category"]["backup_only_no_server_restore"], 1)
+        self.assertEqual(art_summary["counts_by_category"]["raw_json_only"], 1)
+        self.assertEqual(art_summary["unofficial_raw_only_artifacts"], ["Future Prototype"])
+
+    def test_real_local_backups_load_into_restore_plan_without_error(self):
+        downloads_dir = Path(__file__).resolve().parent.parent / "downloads"
+        if not downloads_dir.is_dir():
+            self.skipTest("Local downloads directory not present")
+        checked = 0
+        for nb_dir in sorted(downloads_dir.iterdir()):
+            if nb_dir.is_dir() and (nb_dir / "metadata.json").is_file():
+                plan = build_restore_plan(nb_dir)
+                self.assertIn(plan["summary"]["expected_state"], {"COMPLETE", "COMPLETE WITH LIMITATIONS"})
+                self.assertEqual(plan["summary"]["would_fail_preflight"], 0)
+                checked += 1
+        self.assertGreaterEqual(checked, 1)
+
 
 class FakeRestoreClient:
     def __init__(self):

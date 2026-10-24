@@ -76,6 +76,41 @@ class CanaryHelperTests(unittest.TestCase):
             "video-1",
         )
 
+    def test_artifact_labels_include_video_format_file_ext_and_co_creation(self):
+        video_short = {
+            "type": "video_overview",
+            "variant": None,
+            "video_format": "short",
+            "co_creation_notes": {"producer_notes": "Fast pacing"},
+        }
+        gen_file = {
+            "type": "file",
+            "variant": None,
+            "file_extension": ".xlsx",
+        }
+        self.assertEqual(
+            _artifact_labels(video_short),
+            {"video_overview", "video_overview:short", "co_creation_notes"},
+        )
+        self.assertEqual(
+            _artifact_labels(gen_file),
+            {"file", "file:xlsx"},
+        )
+
+    def test_coverage_reports_unknown_artifacts_explicitly(self):
+        artifacts = [
+            {
+                "id": "unk-1",
+                "title": "Unknown Studio Item",
+                "type": "unknown_88",
+                "type_code": 88,
+                "status": "completed",
+            }
+        ]
+        coverage = _evaluate_artifact_coverage(artifacts, [{"saved": True}], set())
+        self.assertEqual(len(coverage["unknown_artifacts"]), 1)
+        self.assertEqual(coverage["unknown_artifacts"][0]["type_code"], 88)
+
 
 class FakeReadOnlyClient:
     def list_notebooks(self):

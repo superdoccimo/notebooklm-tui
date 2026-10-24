@@ -646,7 +646,7 @@ def extract_firefox_cookies(profile_dir: Path) -> list[dict]:
     query = (
         "SELECT host, name, value, path, expiry, isSecure "
         "FROM moz_cookies "
-        "WHERE host LIKE '%.google.com' OR host='google.com' OR host='notebooklm.google.com'"
+        "WHERE host LIKE '%.google.com' OR host='google.com' OR host='notebook.google.com' OR host='notebooklm.google.com'"
     )
 
     tmp_dir = Path(tempfile.mkdtemp(prefix="nlm_firefox_cookies_"))
@@ -722,7 +722,7 @@ def firefox_login(info: dict) -> list[dict]:
             )
         else:
             firefox_proc = subprocess.Popen(
-                [info["exe"], "https://notebooklm.google.com/"],
+                [info["exe"], f"{BASE_URL}/"],
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
             )
@@ -788,7 +788,7 @@ def get_cookies_via_cdp() -> list[dict]:
         if tab.get("type") != "page":
             continue
         url = tab.get("url", "")
-        if "notebooklm" in url or "google.com" in url:
+        if "notebook.google.com" in url or "notebooklm" in url or "google.com" in url:
             ws_url = tab.get("webSocketDebuggerUrl")
             break
     if not ws_url:

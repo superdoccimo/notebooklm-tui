@@ -538,5 +538,293 @@ class UploadHelperTests(unittest.TestCase):
             )
 
 
+class October2026GeminiNotebookTests(unittest.TestCase):
+    def setUp(self):
+        self.client = NotebookLMClient.__new__(NotebookLMClient)
+
+    def test_all_three_tui_modules_import_and_route_uploads_consistently(self):
+        import nlm_tui
+        import nlm_tui_curses
+        import nlm_tui_en
+
+        class FakeTuiClient:
+            def __init__(self):
+                self.uploaded = []
+                self.pasted = []
+
+            def upload_file(self, notebook_id, path):
+                self.uploaded.append((notebook_id, Path(path).name))
+                return f"up-{len(self.uploaded)}"
+
+            def add_source_text(self, notebook_id, title, text):
+                self.pasted.append((notebook_id, title, text))
+                return f"txt-{len(self.pasted)}"
+
+            def add_source_url(self, notebook_id, url):
+                return "url-1"
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            f_md = root / "doc.md"
+            f_md.write_text("# Doc", encoding="utf-8")
+            f_json = root / "data.json"
+            f_json.write_text('{"k":1}', encoding="utf-8")
+            f_bad_json = root / "bad.json"
+            f_bad_json.write_bytes(b"\xff\xfe\x00\x00")
+            f_xlsx = root / "sheet.xlsx"
+            f_xlsx.write_bytes(b"xlsx")
+
+            for mod in (nlm_tui, nlm_tui_en, nlm_tui_curses):
+                client = FakeTuiClient()
+                summary = mod._upload_to_notebook(
+                    client=client,
+                    notebook_id="nb-1",
+                    files=[f_md, f_json, f_bad_json, f_xlsx],
+                    urls=[],
+                    on_progress=lambda r, m: None,
+                )
+                self.assertEqual(summary["files_ok"], 2)
+                self.assertEqual(summary["files_fail"], 2)
+                self.assertEqual([n for _, n in client.uploaded], ["doc.md"])
+                self.assertEqual([n for _, n, _ in client.pasted], ["data.json"])
+
+    def test_interactive_learning_overview_html_and_structured_exports_meaningful_markdown(self):
+        app_payload = {
+            "summary": "Interactive study guide for network security.",
+            "relatedArtifacts": [{"id": "art-slide-1"}, {"artifactId": "art-quiz-9"}],
+            "sections": [
+                {
+                    "title": "Core Concepts",
+                    "content": "TLS encrypts transport traffic.",
+                    "keyPoints": ["Handshake", "Session keys"],
+                    "slides": [{"title": "TLS Handshake Slide", "content": "ClientHello -> ServerHello"}],
+                }
+            ],
+            "quiz": [
+                {
+                    "question": "Which protocol replaces SSL?",
+                    "questionType": "short_answer",
+                    "acceptedAnswers": ["TLS"],
+                    "explanation": "TLS 1.2/1.3 replaced SSL.",
+                }
+            ],
+            "flashcards": [
+                {"front": "mTLS", "back": "Mutual TLS authentication", "hint": "Both sides present certs"}
+            ],
+            "mindMap": {"name": "Security", "children": [{"name": "TLS"}]},
+            "citations": [{"title": "RFC 8446", "quote": "TLS 1.3 specification"}],
+        }
+        escaped = json.dumps(app_payload).replace('"', "&quot;")
+        html_doc = f'<html><body><app-root data-app-data="{escaped}"></app-root></body></html>'
+
+        art = [None] * 8
+        art[0] = "ilo-1"
+        art[1] = "Security Study Overview"
+        art[2] = 2
+        art[4] = 3
+        art[7] = [html_doc]
+
+        record = self.client._build_artifact_record(art)
+        self.assertEqual(record["variant"], "interactive_learning_overview")
+        self.assertEqual(record["referenced_artifact_ids"], ["art-slide-1", "art-quiz-9"])
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            out_dir = Path(temp_dir)
+            result = save_artifact(self.client, record, out_dir)
+            self.assertTrue(result["saved"])
+            self.assertEqual(result["backup_mode"], "interactive_bundle")
+            md_text = result["dest"].read_text(encoding="utf-8")
+            html_saved = result["dest"].with_suffix(".html").read_text(encoding="utf-8")
+            json_saved = json.loads(result["dest"].with_suffix(".json").read_text(encoding="utf-8"))
+            meta_saved = json.loads(result["metadata_path"].read_text(encoding="utf-8"))
+
+        self.assertIn("- Artifact subtype: interactive_learning_overview", md_text)
+        self.assertIn("`art-slide-1`", md_text)
+        self.assertIn("`art-quiz-9`", md_text)
+        self.assertIn("### 1. Core Concepts", md_text)
+        self.assertIn("TLS Handshake Slide", md_text)
+        self.assertIn("Which protocol replaces SSL?", md_text)
+        self.assertIn("Mutual TLS authentication", md_text)
+        self.assertIn("## Embedded Mind Map", md_text)
+        self.assertIn("RFC 8446", md_text)
+        self.assertEqual(html_saved, html_doc)
+        self.assertEqual(json_saved["referenced_artifact_ids"], ["art-slide-1", "art-quiz-9"])
+        self.assertEqual(meta_saved["restore_category"], "backup_only_no_server_restore")
+
+    def test_co_creation_pending_review_exports_outline_and_producer_notes(self):
+        # Slide deck in pending_review (status_code == 6)
+        slide_art = [None] * 17
+        slide_art[0] = "slide-rev-1"
+        slide_art[1] = "Architecture Deck"
+        slide_art[2] = 8
+        slide_art[4] = 6  # pending_review
+        slide_art[16] = [
+            None,
+            {
+                "prompt": "Focus on zero-trust architecture",
+                "userRevisions": ["Add a slide on device posture"],
+                "outlineNotes": [
+                    {"title": "Intro to Zero Trust", "notes": "Never trust, always verify", "bullets": ["Identity", "Device"]}
+                ],
+            },
+        ]
+        slide_record = self.client._build_artifact_record(slide_art)
+        self.assertEqual(slide_record["status"], "pending_review")
+        self.assertIn("outline_notes", slide_record["co_creation_notes"])
+
+        # Video overview in pending_review (status_code == 6) with Short format & producer notes
+        video_art = [None] * 9
+        video_art[0] = "vid-rev-1"
+        video_art[1] = "60s Quick Summary"
+        video_art[2] = 3
+        video_art[4] = 6  # pending_review
+        video_art[8] = [
+            None,
+            2,  # short video style
+            {
+                "durationSeconds": 58,
+                "aspectRatio": "9:16",
+                "language": "ja",
+                "producerNotes": [
+                    {"scene": "Opening Hook", "direction": "Fast-paced vertical intro"}
+                ],
+            },
+        ]
+        video_record = self.client._build_artifact_record(video_art)
+        self.assertEqual(video_record["status"], "pending_review")
+        self.assertEqual(video_record["video_format"], "short")
+        self.assertIn("producer_notes", video_record["co_creation_notes"])
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            out_dir = Path(temp_dir)
+            s_res = save_artifact(self.client, slide_record, out_dir)
+            v_res = save_artifact(self.client, video_record, out_dir)
+
+            self.assertFalse(s_res["saved"])  # Not completed yet
+            self.assertTrue(s_res["review_saved"])
+            self.assertEqual(s_res["backup_mode"], "co_creation_review")
+            s_md = s_res["review_dest"].read_text(encoding="utf-8")
+            self.assertIn("Review Outline Notes (Slide Deck)", s_md)
+            self.assertIn("Intro to Zero Trust", s_md)
+            self.assertIn("Add a slide on device posture", s_md)
+
+            self.assertTrue(v_res["review_saved"])
+            v_md = v_res["review_dest"].read_text(encoding="utf-8")
+            self.assertIn("- Video format: short", v_md)
+            self.assertIn("Review Producer Notes (Video Overview)", v_md)
+            self.assertIn("Fast-paced vertical intro", v_md)
+
+    def test_generated_file_formats_identification_download_and_no_binary_spoofing(self):
+        target_cases = [
+            ("report.pdf", "application/pdf", ".pdf", True),
+            ("spec.docx", "application/vnd.openxmlformats-officedocument.wordprocessingml.document", ".docx", True),
+            ("readme.md", "text/markdown", ".md", False),
+            ("notes.txt", "text/plain", ".txt", False),
+            ("metrics.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", ".xlsx", True),
+            ("slides.pptx", "application/vnd.openxmlformats-officedocument.presentationml.presentation", ".pptx", True),
+            ("table.csv", "text/csv", ".csv", False),
+            ("config.json", "application/json", ".json", False),
+            ("chart.png", "image/png", ".png", True),
+            ("photo.jpg", "image/jpeg", ".jpg", True),
+            ("anim.gif", "image/gif", ".gif", True),
+            ("diagram.svg", "image/svg+xml", ".svg", False),
+        ]
+
+        self.client.download_url = lambda url, dest: (Path(dest).write_bytes(b"BINARY_OK") or True)
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            out_dir = Path(temp_dir)
+            for idx, (fname, mime, expected_ext, is_binary) in enumerate(target_cases, 1):
+                art = [
+                    f"file-{idx}",
+                    fname,
+                    10,
+                    None,
+                    3,
+                    {"fileName": fname, "mimeType": mime, "downloadUrl": f"https://notebook.google.com/dl/{fname}"},
+                ]
+                record = self.client._build_artifact_record(art)
+                self.assertEqual(record["file_extension"], expected_ext)
+                res = save_artifact(self.client, record, out_dir)
+                self.assertTrue(res["saved"])
+                self.assertEqual(res["dest"].suffix, expected_ext)
+
+            # Anti-spoofing check: binary .xlsx without download_url must NOT write extracted text to .xlsx
+            spoof_art = [
+                "file-spoof",
+                "financials.xlsx",
+                10,
+                None,
+                3,
+                {"fileName": "financials.xlsx", "mimeType": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", "text": "Col1,Col2"},
+            ]
+            spoof_record = self.client._build_artifact_record(spoof_art)
+            self.client.get_artifact = lambda aid: None
+            spoof_res = save_artifact(self.client, spoof_record, out_dir)
+            self.assertFalse(spoof_res["saved"])
+            self.assertFalse(spoof_res["dest"].exists())
+            self.assertTrue(spoof_res["extracted_text_dest"].exists())
+            self.assertEqual(spoof_res["extracted_text_dest"].name, "financials.extracted.txt")
+            meta = json.loads(spoof_res["metadata_path"].read_text(encoding="utf-8"))
+            self.assertEqual(meta["restore_category"], "partial_data_only")
+            self.assertIn("refused to fake extracted text", meta["warning"])
+
+    def test_raw_snapshot_redacts_signed_urls_and_credentials_and_marks_unknown_artifacts(self):
+        art = {
+            "id": "unk-1",
+            "title": "Mystery Studio Output",
+            "type": "unknown_99",
+            "type_code": 99,
+            "variant": None,
+            "status": "completed",
+            "status_code": 3,
+            "_raw": [
+                "unk-1",
+                "https://lh3.googleusercontent.com/notebooklm/AG60hQpSignedCapabilityToken12345",
+                "https://notebook.google.com/api?token=secret123&ok=1",
+                "SID=mysecretcookie; SAPISID=hashsecret",
+                {"csrf_token": "at_secret"},
+            ],
+        }
+
+        class DummyClient:
+            def download_artifact(self, a, d):
+                return False
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            out_dir = Path(temp_dir)
+            res = save_artifact(DummyClient(), art, out_dir)
+            raw_text = res["raw_snapshot"].read_text(encoding="utf-8")
+            meta = json.loads(res["metadata_path"].read_text(encoding="utf-8"))
+
+        self.assertNotIn("AG60hQpSignedCapabilityToken12345", raw_text)
+        self.assertIn("https://lh3.googleusercontent.com/[REDACTED_SIGNED_URL]", raw_text)
+        self.assertNotIn("secret123", raw_text)
+        self.assertNotIn("mysecretcookie", raw_text)
+        self.assertNotIn("at_secret", raw_text)
+        self.assertFalse(meta["official_support"])
+        self.assertEqual(meta["restore_category"], "raw_json_only")
+
+    def test_real_local_backup_html_files_parse_and_render(self):
+        real_dir = Path(__file__).resolve().parent.parent / "downloads" / "NotebookLM TUI Setup and Authentication Guide" / "artifacts"
+        if not real_dir.is_dir():
+            self.skipTest("Local real backup directory not present")
+        html_files = sorted(real_dir.glob("*.html"))
+        self.assertGreaterEqual(len(html_files), 2)
+        for html_path in html_files:
+            html_content = html_path.read_text(encoding="utf-8")
+            app_data = self.client._extract_app_artifact_data(html_content)
+            self.assertIsInstance(app_data, dict)
+            art = {"title": html_path.stem, "type": "flashcards", "variant": None}
+            md = self.client._render_app_artifact_markdown(
+                art,
+                app_data,
+                html_path.name,
+                html_path.with_suffix(".json").name,
+            )
+            self.assertTrue(md.startswith(f"# {html_path.stem}"))
+            self.assertNotIn("could not be parsed", md)
+
+
 if __name__ == "__main__":
     unittest.main()

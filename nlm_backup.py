@@ -21,7 +21,14 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-from notebooklm_client import NotebookLMClient, NotebookLMError, AuthenticationError
+from notebooklm_client import (
+    AuthenticationError,
+    BINARY_GENERATED_FILE_EXTENSIONS,
+    NotebookLMClient,
+    NotebookLMError,
+    SUPPORTED_GENERATED_FILE_EXTENSIONS,
+    sanitize_for_backup,
+)
 
 # アーティファクトタイプ → デフォルト拡張子
 ARTIFACT_EXTENSIONS = {
@@ -272,7 +279,7 @@ def save_pdf_source(client: NotebookLMClient, content: dict, out_dir: Path) -> l
 # ---------------------------------------------------------------------------
 
 def save_artifact_raw_snapshot(artifact: dict, art_dir: Path, stem: str) -> Path:
-    """Studio artifact の生 payload を将来の再解析用に JSON 保存"""
+    """Studio artifact の生 payload を将来の再解析用に JSON 保存（認証情報・署名URLは除外）"""
     raw_dir = art_dir / "_raw"
     raw_dir.mkdir(parents=True, exist_ok=True)
     dest = _unique_path(raw_dir / f"{stem}.json")
@@ -284,7 +291,7 @@ def save_artifact_raw_snapshot(artifact: dict, art_dir: Path, stem: str) -> Path
         "variant": artifact.get("variant"),
         "status": artifact.get("status"),
         "status_code": artifact.get("status_code"),
-        "raw": artifact.get("_raw"),
+        "raw": sanitize_for_backup(artifact.get("_raw")),
     }
     with open(dest, "w", encoding="utf-8") as f:
         json.dump(snapshot, f, ensure_ascii=False, indent=2)
@@ -301,9 +308,19 @@ def _artifact_stem(artifact: dict) -> str:
 def _artifact_extension(artifact: dict) -> str:
     art_type = artifact.get("type", "unknown")
     variant = artifact.get("variant")
-    if variant == "interactive_mind_map":
+    if variant in {"interactive_mind_map", "interactive_learning_overview"}:
         return ".md"
-    if art_type in {"guided_view", "fantasy_map", "mind_map", "file"} and not artifact.get("download_url"):
+    if art_type == "file" or artifact.get("type_code") == 10:
+        file_ext = (artifact.get("file_extension") or "").lower()
+        if file_ext in SUPPORTED_GENERATED_FILE_EXTENSIONS:
+            if file_ext in BINARY_GENERATED_FILE_EXTENSIONS and not artifact.get("download_url"):
+                return ".json"
+            return file_ext
+        if not artifact.get("download_url"):
+            return ".json"
+    if art_type in {"guided_view", "fantasy_map", "mind_map"} and not artifact.get("download_url"):
+        if artifact.get("app_html") or variant == "interactive_learning_overview":
+            return ".md"
         return ".json"
     if (
         artifact.get("structured_content") is not None
@@ -315,6 +332,87 @@ def _artifact_extension(artifact: dict) -> str:
     return ARTIFACT_EXTENSIONS.get(art_type, ".bin")
 
 
+def _fallback_render_co_creation_markdown(artifact: dict) -> str:
+    helper = NotebookLMClient.__new__(NotebookLMClient)
+    return helper.render_co_creation_review_markdown(artifact)
+
+
+def _artifact_metadata_path(artifact: dict, art_dir: Path, stem: str) -> Path:
+    meta_dir = art_dir / "_metadata"
+    meta_dir.mkdir(parents=True, exist_ok=True)
+    art_id = sanitize_filename(str(artifact.get("id") or stem or "artifact"))
+    return _unique_path(meta_dir / f"{art_id}.json")
+
+
+def _write_artifact_metadata(artifact: dict, result: dict, art_dir: Path, stem: str) -> Path:
+    """Persist restore-safe Studio artifact metadata sidecar without signed capability URLs."""
+    files = []
+    for key in ("dest", "pptx_dest", "review_dest", "review_json_dest", "co_creation_dest", "extracted_text_dest"):
+        p = result.get(key)
+        if p and Path(p).exists():
+            try:
+                files.append(str(Path(p).relative_to(art_dir)))
+            except ValueError:
+                files.append(str(Path(p)))
+    if result.get("dest"):
+        dest_p = Path(result["dest"])
+        for companion_ext in (".html", ".json"):
+            comp = dest_p.with_suffix(companion_ext)
+            if comp != dest_p and comp.exists():
+                try:
+                    rel = str(comp.relative_to(art_dir))
+                except ValueError:
+                    rel = str(comp)
+                if rel not in files:
+                    files.append(rel)
+
+    art_type = str(artifact.get("type") or "unknown")
+    official_support = not art_type.startswith("unknown_") and art_type not in {"fantasy_map"}
+    if not official_support:
+        restore_category = "raw_json_only"
+    elif result.get("saved"):
+        restore_category = "backup_only_no_server_restore"
+    elif result.get("review_saved") or result.get("extracted_text_dest"):
+        restore_category = "partial_data_only"
+    else:
+        restore_category = "raw_json_only"
+
+    payload = {
+        "schema_version": 2,
+        "id": artifact.get("id"),
+        "title": artifact.get("title"),
+        "type": art_type,
+        "type_code": artifact.get("type_code"),
+        "variant": artifact.get("variant"),
+        "status": artifact.get("status"),
+        "status_code": artifact.get("status_code"),
+        "official_support": official_support,
+        "backup_mode": result.get("backup_mode"),
+        "restore_category": restore_category,
+        "saved": bool(result.get("saved")),
+        "review_saved": bool(result.get("review_saved")),
+        "files": files,
+    }
+    for optional_key in (
+        "video_format",
+        "file_extension",
+        "file_name",
+        "content_mime",
+        "referenced_artifact_ids",
+        "generation_metadata",
+        "co_creation_notes",
+    ):
+        if artifact.get(optional_key) is not None:
+            payload[optional_key] = sanitize_for_backup(artifact.get(optional_key))
+    if result.get("warning"):
+        payload["warning"] = result["warning"]
+
+    dest = _artifact_metadata_path(artifact, art_dir, stem)
+    with open(dest, "w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False, indent=2)
+    return dest
+
+
 def save_artifact(client: NotebookLMClient, artifact: dict, out_dir: Path) -> dict:
     """単一Studio artifactをCLI/TUI共通ルールで保存する"""
     art_dir = out_dir / "artifacts"
@@ -322,23 +420,110 @@ def save_artifact(client: NotebookLMClient, artifact: dict, out_dir: Path) -> di
 
     stem = _artifact_stem(artifact)
     raw_snapshot = save_artifact_raw_snapshot(artifact, art_dir, stem)
+    status = artifact.get("status", "")
     result = {
         "saved": False,
-        "status": artifact.get("status", ""),
+        "review_saved": False,
+        "status": status,
+        "backup_mode": "raw_json_only",
         "raw_snapshot": raw_snapshot,
         "dest": None,
+        "review_dest": None,
+        "review_json_dest": None,
+        "co_creation_dest": None,
+        "extracted_text_dest": None,
         "pptx_saved": None,
         "pptx_dest": None,
         "pages_count": None,
     }
 
-    if artifact.get("status") != "completed":
+    if status != "completed":
+        # Co-creation pre-Proceed review state (pending_review) or non-completed row with review notes
+        if status == "pending_review" or artifact.get("co_creation_notes") or artifact.get("generation_metadata"):
+            review_md_dest = _unique_path(art_dir / f"{stem}.review.md")
+            review_json_dest = _unique_path(art_dir / f"{stem}.review.json")
+            render_fn = getattr(client, "render_co_creation_review_markdown", None)
+            md_text = render_fn(artifact) if callable(render_fn) else _fallback_render_co_creation_markdown(artifact)
+            try:
+                review_md_dest.write_text(md_text, encoding="utf-8")
+                review_json_dest.write_text(
+                    json.dumps(
+                        {
+                            "id": artifact.get("id"),
+                            "title": artifact.get("title"),
+                            "type": artifact.get("type"),
+                            "type_code": artifact.get("type_code"),
+                            "status": status,
+                            "status_code": artifact.get("status_code"),
+                            "video_format": artifact.get("video_format"),
+                            "generation_metadata": sanitize_for_backup(artifact.get("generation_metadata")),
+                            "co_creation_notes": sanitize_for_backup(artifact.get("co_creation_notes")),
+                        },
+                        ensure_ascii=False,
+                        indent=2,
+                    ),
+                    encoding="utf-8",
+                )
+                result["review_saved"] = True
+                result["review_dest"] = review_md_dest
+                result["review_json_dest"] = review_json_dest
+                result["backup_mode"] = "co_creation_review"
+            except OSError:
+                pass
+        result["metadata_path"] = _write_artifact_metadata(artifact, result, art_dir, stem)
+        return result
+
+    art_type = artifact.get("type", "unknown")
+    file_ext = (artifact.get("file_extension") or "").lower()
+
+    # Guard for generated binary files (PDF, DOCX, XLSX, PPTX, PNG, JPG, GIF):
+    # Never fake extracted text or JSON metadata as the binary file itself.
+    if (art_type == "file" or artifact.get("type_code") == 10) and file_ext in BINARY_GENERATED_FILE_EXTENSIONS and not artifact.get("download_url"):
+        # Try detail fetch once if client supports download_artifact
+        dest = _unique_path(art_dir / f"{stem}{file_ext}")
+        result["dest"] = dest
+        saved = client.download_artifact(artifact, dest)
+        result["saved"] = saved
+        if saved:
+            result["backup_mode"] = "entity"
+        else:
+            dest.unlink(missing_ok=True)
+            result["warning"] = (
+                f"Original binary for {file_ext} file artifact was unavailable; "
+                "refused to fake extracted text as a binary file."
+            )
+            if artifact.get("extracted_text_only"):
+                txt_dest = _unique_path(art_dir / f"{stem}.extracted.txt")
+                txt_dest.write_text(str(artifact["extracted_text_only"]), encoding="utf-8")
+                result["extracted_text_dest"] = txt_dest
+                result["backup_mode"] = "extracted_text_only"
+            else:
+                result["backup_mode"] = "raw_json_only"
+        result["metadata_path"] = _write_artifact_metadata(artifact, result, art_dir, stem)
         return result
 
     ext = _artifact_extension(artifact)
     dest = _unique_path(art_dir / f"{stem}{ext}")
     result["dest"] = dest
     result["saved"] = client.download_artifact(artifact, dest)
+    if result["saved"]:
+        if str(art_type).startswith("unknown_") or art_type in {"fantasy_map"}:
+            result["backup_mode"] = "raw_json_only"
+            result["warning"] = f"Artifact type '{art_type}' is not officially supported; raw payload preserved."
+        elif artifact.get("variant") == "interactive_learning_overview" or artifact.get("app_html"):
+            result["backup_mode"] = "interactive_bundle"
+        else:
+            result["backup_mode"] = "entity"
+
+    if artifact.get("co_creation_notes"):
+        co_dest = _unique_path(art_dir / f"{stem}.co_creation.md")
+        render_fn = getattr(client, "render_co_creation_review_markdown", None)
+        md_text = render_fn(artifact) if callable(render_fn) else _fallback_render_co_creation_markdown(artifact)
+        try:
+            co_dest.write_text(md_text, encoding="utf-8")
+            result["co_creation_dest"] = co_dest
+        except OSError:
+            pass
 
     if artifact.get("pptx_url"):
         pptx_dest = _unique_path(dest.with_suffix(".pptx"))
@@ -349,6 +534,7 @@ def save_artifact(client: NotebookLMClient, artifact: dict, out_dir: Path) -> di
         pages_dir = art_dir / dest.stem
         result["pages_count"] = len(client.download_artifact_pages(artifact, pages_dir))
 
+    result["metadata_path"] = _write_artifact_metadata(artifact, result, art_dir, stem)
     return result
 
 
@@ -364,10 +550,17 @@ def save_artifacts(client: NotebookLMClient, artifacts: list[dict], out_dir: Pat
         raw_snapshot = result["raw_snapshot"]
 
         if result["status"] != "completed":
-            print(
-                f"    [{art_type}] (status: {result['status']}, skipped; "
-                f"raw: {raw_snapshot.relative_to(art_dir)})"
-            )
+            if result.get("review_saved") and result.get("review_dest"):
+                print(
+                    f"    [{art_type}] (status: {result['status']}; "
+                    f"review notes saved: {result['review_dest'].name}; "
+                    f"raw: {raw_snapshot.relative_to(art_dir)})"
+                )
+            else:
+                print(
+                    f"    [{art_type}] (status: {result['status']}, skipped; "
+                    f"raw: {raw_snapshot.relative_to(art_dir)})"
+                )
             continue
 
         dest = result["dest"]
